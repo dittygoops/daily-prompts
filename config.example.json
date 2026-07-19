@@ -1,0 +1,10 @@
+{
+  "participants": {
+    "a": { "name": "Your Name", "phone": "+14805551234" },
+    "b": { "name": "Partner Name", "phone": "+14805555678" }
+  },
+  "dispatchTime": "08:30",
+  "timezone": "America/Phoenix",
+  "settleWindowSeconds": 150,
+  "ledgerPath": "./ledger.db"
+}
