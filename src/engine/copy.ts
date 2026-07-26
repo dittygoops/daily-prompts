@@ -27,3 +27,19 @@ export function skipAck(): string {
 export function oobReply(): string {
   return `I only do one daily question for now — I'll text you at prompt time!`;
 }
+
+export function nudgeNoResponse(): string {
+  return `No rush, but today's question is still open whenever you get a chance!`;
+}
+
+export function nudgePartnerWaiting(partnerName: string): string {
+  return `Friendly nudge: ${partnerName} already answered today's question, and it's waiting for you whenever you're free!`;
+}
+
+export function nudgeAlmostDue(): string {
+  return `Quick heads up: today's question closes soon if you want to get your answer in!`;
+}
+
+export function weeklyRecapMessage(recapText: string): string {
+  return recapText;
+}

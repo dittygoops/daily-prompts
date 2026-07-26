@@ -52,7 +52,7 @@ export class EngineRuntime {
    * interleave. Unlike fire-and-forget inbound handling, failures propagate
    * to the caller so a broken dispatch is loud. */
   async dispatch(date: string): Promise<void> {
-    const prompt = this.opts.promptSource.nextPrompt(date);
+    const prompt = await this.opts.promptSource.nextPrompt(date);
     await this.enqueue({ type: "DispatchDue", date, at: this.now(), prompt });
   }
 

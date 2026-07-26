@@ -27,6 +27,40 @@ const rawConfigSchema = z.object({
   ),
   settleWindowSeconds: z.number().int().positive().default(150),
   ledgerPath: z.string().min(1).default("./ledger.db"),
+  extraction: z
+    .object({
+      model: z.string().min(1).default("google/gemini-2.5-flash"),
+      pollMinutes: z.number().int().positive().default(5),
+    })
+    .default({ model: "google/gemini-2.5-flash", pollMinutes: 5 }),
+  generation: z
+    .object({
+      model: z.string().min(1).default("google/gemini-2.5-flash"),
+      historyWindowDays: z.number().int().positive().default(14),
+      feedbackWindowDays: z.number().int().positive().default(14),
+      contextBudgetChars: z.number().int().positive().default(3000),
+    })
+    .default({
+      model: "google/gemini-2.5-flash",
+      historyWindowDays: 14,
+      feedbackWindowDays: 14,
+      contextBudgetChars: 3000,
+    }),
+  nudge: z
+    .object({
+      afterHours: z.number().positive().default(4),
+      beforeDueHours: z.number().positive().default(4),
+      pollMinutes: z.number().int().positive().default(10),
+    })
+    .default({ afterHours: 4, beforeDueHours: 4, pollMinutes: 10 }),
+  weeklyRecap: z
+    .object({
+      enabled: z.boolean().default(false),
+      dayOfWeek: z.number().int().min(0).max(6).default(0),
+      pollMinutes: z.number().int().positive().default(15),
+      model: z.string().min(1).default("google/gemini-2.5-flash"),
+    })
+    .default({ enabled: false, dayOfWeek: 0, pollMinutes: 15, model: "google/gemini-2.5-flash" }),
 });
 
 export interface Config {
@@ -38,10 +72,23 @@ export interface Config {
   timezone: string;
   settleWindowSeconds: number;
   ledgerPath: string;
+  extraction: { model: string; pollMinutes: number };
+  generation: { model: string; historyWindowDays: number; feedbackWindowDays: number; contextBudgetChars: number };
+  nudge: { afterHours: number; beforeDueHours: number; pollMinutes: number };
+  weeklyRecap: { enabled: boolean; dayOfWeek: number; pollMinutes: number; model: string };
   spectrum: { projectId: string; projectSecret: string };
+  openrouter: { apiKey: string };
+  supermemory: { apiKey: string; baseUrl: string };
 }
 
 export type PersonId = "a" | "b";
+
+const REQUIRED_ENV = [
+  "SPECTRUM_PROJECT_ID",
+  "SPECTRUM_PROJECT_SECRET",
+  "OPENROUTER_API_KEY",
+  "SUPERMEMORY_API_KEY",
+] as const;
 
 export function loadConfig(
   raw: unknown,
@@ -62,7 +109,7 @@ export function loadConfig(
     );
   }
 
-  for (const key of ["SPECTRUM_PROJECT_ID", "SPECTRUM_PROJECT_SECRET"] as const) {
+  for (const key of REQUIRED_ENV) {
     if (!env[key]) {
       throw new Error(`Missing required environment variable: ${key}`);
     }
@@ -72,13 +119,17 @@ export function loadConfig(
     number,
     number,
   ];
-
   return {
     ...config,
     dispatchTime: { hour, minute },
     spectrum: {
       projectId: env.SPECTRUM_PROJECT_ID!,
       projectSecret: env.SPECTRUM_PROJECT_SECRET!,
+    },
+    openrouter: { apiKey: env.OPENROUTER_API_KEY! },
+    supermemory: {
+      apiKey: env.SUPERMEMORY_API_KEY!,
+      baseUrl: env.SUPERMEMORY_BASE_URL ?? "http://localhost:6767",
     },
   };
 }

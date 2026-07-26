@@ -38,3 +38,61 @@ CREATE TABLE IF NOT EXISTS prompt_usage (
   prompt_id TEXT PRIMARY KEY,
   used_on TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS extractions (
+  day_id INTEGER NOT NULL REFERENCES days(id),
+  person TEXT NOT NULL CHECK (person IN ('a','b')),
+  status TEXT NOT NULL CHECK (status IN ('done','failed')),
+  attempts INTEGER NOT NULL DEFAULT 1,
+  observation_count INTEGER,
+  completed_at TEXT,
+  PRIMARY KEY (day_id, person)
+);
+
+CREATE TABLE IF NOT EXISTS generation_log (
+  id INTEGER PRIMARY KEY,
+  date TEXT NOT NULL,
+  prompt_id TEXT,
+  prompt_text TEXT,
+  model TEXT,
+  system_prompt TEXT,
+  user_prompt TEXT,
+  raw_response TEXT,
+  rationale TEXT,
+  fell_back INTEGER NOT NULL DEFAULT 0,
+  fallback_reason TEXT,
+  at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS recap_log (
+  id INTEGER PRIMARY KEY,
+  week_start TEXT NOT NULL,
+  week_end TEXT NOT NULL,
+  recap_text TEXT NOT NULL,
+  model TEXT,
+  system_prompt TEXT,
+  user_prompt TEXT,
+  raw_response TEXT,
+  fell_back INTEGER NOT NULL DEFAULT 0,
+  fallback_reason TEXT,
+  sent_at TEXT NOT NULL,
+  UNIQUE (week_start)
+);
+
+CREATE TABLE IF NOT EXISTS nudges (
+  day_id INTEGER NOT NULL REFERENCES days(id),
+  person TEXT NOT NULL CHECK (person IN ('a','b')),
+  trigger TEXT NOT NULL CHECK (trigger IN ('no_response','partner_waiting','almost_due')),
+  sent_at TEXT NOT NULL,
+  PRIMARY KEY (day_id, person, trigger)
+);
+
+CREATE TABLE IF NOT EXISTS prompt_ideas (
+  id INTEGER PRIMARY KEY,
+  person TEXT NOT NULL CHECK (person IN ('a','b')),
+  text TEXT NOT NULL,
+  suggested_day_id INTEGER REFERENCES days(id),
+  suggested_at TEXT NOT NULL,
+  used_day_id INTEGER REFERENCES days(id),
+  used_at TEXT
+);

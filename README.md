@@ -1,19 +1,37 @@
 # daily-prompts
 
-A tiny always-on agent that texts the same short daily question to two people (a couple) over iMessage, collects their answers, and shares each person's answer with the other only once both are in. Skipping is one word (SKIP). Feedback is welcome any time after you answer.
+A tiny always-on agent that texts the same short daily question to two people (a couple) over iMessage, collects their answers, and shares each person's answer with the other only once both are in. Skipping is one word (SKIP). Feedback is welcome any time after you answer. Over time the daily question is generated from each person's accumulated memory (recent threads, interests, coverage of past topics) rather than drawn from a fixed list — if generation ever fails, it falls back to a static 30-question bank so the daily ritual never misses a day.
 
 Docs: product overview in `docs/prd-daily-imessage-checkin.md`, system PRDs and the build spec alongside it in `docs/`.
 
 ## Privacy, plainly
 
-Messages transit two third parties: **Photon** (the iMessage delivery service, photon.codes) and, once prompt generation ships, **OpenRouter** (LLM API). Conversation history lives in a local SQLite file (`ledger.db`) on the machine running the daemon. Both participants should know this before the first prompt goes out.
+Messages and answers transit two third parties: **Photon** (the iMessage delivery service, photon.codes) and **OpenRouter** (LLM API, used to extract per-person memory from each day's answers, and to generate each day's question from that memory). Derived memory (not verbatim messages) is stored in a **self-hosted Supermemory** instance on the same machine (`~/.supermemory/data`) — it never leaves your Mac. Conversation history itself lives in a local SQLite file (`ledger.db`) on the machine running the daemon. Both participants should know this before the first prompt goes out.
 
 ## Self-hosting
 
 1. **Photon**: sign up at [app.photon.codes](https://app.photon.codes), create a project, note the project ID and secret. The free shared-line tier is sufficient. Use a project that nothing else shares, or inbound replies will cross-route.
-2. **Install**: `bun install` (needs [Bun](https://bun.sh)).
-3. **Configure**: copy `.env.example` to `.env` and set `SPECTRUM_PROJECT_ID` / `SPECTRUM_PROJECT_SECRET` (Spectrum is Photon's SDK; the credentials come from your Photon project). Copy `config.example.json` to `config.json` (two names + E.164 phone numbers, dispatch time, IANA timezone).
-4. **Run**: `bun index.ts` (foreground), or install the launchd job for always-on:
+2. **OpenRouter**: sign up at [openrouter.ai](https://openrouter.ai), create an API key, add a few dollars of credit (see `docs/openrouter-cost-report.md` — expected spend is well under $1/month at this volume, but OpenRouter rejects requests outright once your balance drops near $0).
+3. **Supermemory** (self-hosted, one-time):
+   ```bash
+   curl -fsSL https://supermemory.ai/install | bash
+   ```
+   Then point it at OpenRouter by editing `~/.supermemory/env`:
+   ```
+   OPENAI_BASE_URL=https://openrouter.ai/api/v1
+   OPENAI_API_KEY=<your OpenRouter key>
+   OPENAI_MODEL=google/gemini-2.5-flash
+   ```
+   Install it as an always-on service:
+   ```bash
+   cp ops/com.dailyprompts.supermemory.plist ~/Library/LaunchAgents/
+   launchctl load ~/Library/LaunchAgents/com.dailyprompts.supermemory.plist
+   tail -f ~/Library/Logs/supermemory.log
+   ```
+   Its first boot prints an API key — you'll need it for the next step.
+4. **Install**: `bun install` (needs [Bun](https://bun.sh)).
+5. **Configure**: copy `.env.example` to `.env` and set `SPECTRUM_PROJECT_ID`/`SPECTRUM_PROJECT_SECRET` (from your Photon project), `OPENROUTER_API_KEY`, and `SUPERMEMORY_API_KEY` (from step 3). Copy `config.example.json` to `config.json` (two names + E.164 phone numbers, dispatch time, IANA timezone; the `extraction`/`generation` blocks' defaults are usually fine as-is).
+6. **Run**: `bun index.ts` (foreground), or install the launchd job for always-on:
 
 ```bash
 cp ops/com.dailyprompts.daemon.plist ~/Library/LaunchAgents/
@@ -22,7 +40,36 @@ launchctl load ~/Library/LaunchAgents/com.dailyprompts.daemon.plist
 tail -f ~/Library/Logs/daily-prompts.log
 ```
 
-The daemon reconnects its message stream after sleep; messages sent while it was down are delivered on reconnect. A dispatch missed while asleep is sent late the same calendar day, and abandoned entirely after midnight.
+The daemon reconnects its message stream after sleep; messages sent while it was down are delivered on reconnect. A dispatch missed while asleep is sent late the same calendar day, and abandoned entirely after midnight. Memory extraction runs on a poller (`extraction.pollMinutes`, default 5) plus a startup catch-up pass, and never blocks message dispatch even if OpenRouter or Supermemory are down — failed extractions retry automatically (up to 3 attempts) on the next poll.
+
+### Adaptive prompt generation
+
+Each day's question is generated fresh from both people's memory context (facts, open threads, interests, topic coverage), recent prompt history (so it doesn't repeat), and any feedback or explicitly suggested prompt ideas. It balances following up on a known thread against exploring new territory, at the model's judgment. If generation fails for any reason — OpenRouter down, a malformed response, Supermemory unreachable — it falls back to the static 30-question bank (`data/prompts.json`) so the daily message always goes out; every fallback is logged loudly and recorded in the ledger's `generation_log` table alongside every successful generation's full context and reasoning, for later review. Suggested prompt ideas are tracked durably (never silently expire) until the generator actually uses one.
+
+### Reminder nudges
+
+If one or both of you hasn't answered yet, a gentle nudge can go out via three independent triggers, each fires at most once per person per day: **no_response** (neither of you has answered `nudge.afterHours` — default 4 — after the prompt went out), **partner_waiting** (your partner answered and it's been `nudge.afterHours` since then and you still haven't — worded as "X is waiting on you"), and **almost_due** (a last call within `nudge.beforeDueHours` — default 4 — of the next day's prompt, regardless of your partner's state). More than one can fire for the same person on the same day if their conditions are met at different times. Nudges never interrupt someone mid-answer (`collecting` state) and stop entirely once you've answered or skipped. On by default; set `nudge.pollMinutes` (default 10) to change how often the checks run, or all three hour values to change the timing.
+
+### Weekly recap
+
+Optional (`weeklyRecap.enabled`, default `false`) — both of you get an identical recap covering the trailing 7 days: mechanical stats (days answered together, topics touched, pulled from the ledger, never from the LLM) plus an LLM-synthesized highlight paragraph grounded in that week's actual answers. If the highlight generation fails, the recap still goes out with just the mechanical stats. It's triggered by state, not a fixed clock time: `weeklyRecap.dayOfWeek` (0=Sunday..6=Saturday) names the day that ends each week, and the recap fires as soon as that day's prompt has actually resolved, whether both of you answered (same-day), one did, or neither did (it fires once the next day's prompt dispatches and expires it). A poller checks this every `weeklyRecap.pollMinutes` (default 15); no separate missed-recap handling is needed since the next poll after any downtime catches up naturally.
+
+### Rebuilding memory
+
+If a bad extraction run needs undoing (a code/prompt bug, a misconfigured backend), memory is fully rederivable from the ledger, which is the durable source of truth:
+
+```bash
+# stop the daemon first — a concurrent extraction poll can race with a rebuild
+launchctl unload ~/Library/LaunchAgents/com.dailyprompts.daemon.plist
+
+bun scripts/rebuild-memory.ts config.json --dry-run   # preview, makes no changes
+bun scripts/rebuild-memory.ts config.json --yes        # wipe + reprocess both people
+bun scripts/rebuild-memory.ts config.json --person=a --yes  # just one person
+
+launchctl load ~/Library/LaunchAgents/com.dailyprompts.daemon.plist
+```
+
+This permanently deletes the target person's derived memory before reprocessing, so it requires an explicit `--yes` (or `--dry-run` to preview harmlessly).
 
 ## Development
 

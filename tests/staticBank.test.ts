@@ -15,19 +15,19 @@ const rngFrom = (values: number[]) => {
 };
 
 describe("StaticBankPromptSource", () => {
-  test("returns a prompt from the bank", () => {
+  test("returns a prompt from the bank", async () => {
     const ledger = Ledger.open(":memory:");
     const source = new StaticBankPromptSource(bank, ledger, rngFrom([0]));
-    const prompt = source.nextPrompt("2026-07-17");
+    const prompt = await source.nextPrompt("2026-07-17");
     expect(bank.map((p) => p.id)).toContain(prompt.id);
   });
 
-  test("never repeats until the bank is exhausted", () => {
+  test("never repeats until the bank is exhausted", async () => {
     const ledger = Ledger.open(":memory:");
     const source = new StaticBankPromptSource(bank, ledger, rngFrom([0.9, 0.5, 0.1]));
     const seen = new Set<string>();
     for (let i = 0; i < bank.length; i++) {
-      const p = source.nextPrompt(`2026-07-${17 + i}`);
+      const p = await source.nextPrompt(`2026-07-${17 + i}`);
       ledger.markPromptUsed(p.id, `2026-07-${17 + i}`);
       expect(seen.has(p.id)).toBe(false);
       seen.add(p.id);
@@ -35,13 +35,13 @@ describe("StaticBankPromptSource", () => {
     expect(seen.size).toBe(bank.length);
   });
 
-  test("after exhaustion a fresh no-repeat cycle begins (not sampling with replacement)", () => {
+  test("after exhaustion a fresh no-repeat cycle begins (not sampling with replacement)", async () => {
     const ledger = Ledger.open(":memory:");
     for (const p of bank) ledger.markPromptUsed(p.id, "2026-07-01");
     const source = new StaticBankPromptSource(bank, ledger, rngFrom([0.9, 0.5, 0.1]));
     const seen = new Set<string>();
     for (let i = 0; i < bank.length; i++) {
-      const p = source.nextPrompt(`2026-08-${10 + i}`);
+      const p = await source.nextPrompt(`2026-08-${10 + i}`);
       ledger.markPromptUsed(p.id, `2026-08-${10 + i}`);
       expect(seen.has(p.id)).toBe(false);
       seen.add(p.id);
@@ -49,12 +49,12 @@ describe("StaticBankPromptSource", () => {
     expect(seen.size).toBe(bank.length);
   });
 
-  test("selection is deterministic under an injected RNG", () => {
+  test("selection is deterministic under an injected RNG", async () => {
     const l1 = Ledger.open(":memory:");
     const l2 = Ledger.open(":memory:");
     const s1 = new StaticBankPromptSource(bank, l1, rngFrom([0.5]));
     const s2 = new StaticBankPromptSource(bank, l2, rngFrom([0.5]));
-    expect(s1.nextPrompt("2026-07-17").id).toBe(s2.nextPrompt("2026-07-17").id);
+    expect((await s1.nextPrompt("2026-07-17")).id).toBe((await s2.nextPrompt("2026-07-17")).id);
   });
 
   test("the real seed bank loads: 30 unique ids and texts", async () => {

@@ -6,5 +6,19 @@
   "dispatchTime": "08:30",
   "timezone": "America/Phoenix",
   "settleWindowSeconds": 150,
-  "ledgerPath": "./ledger.db"
+  "ledgerPath": "./ledger.db",
+  "extraction": { "model": "google/gemini-2.5-flash", "pollMinutes": 5 },
+  "generation": {
+    "model": "google/gemini-2.5-flash",
+    "historyWindowDays": 14,
+    "feedbackWindowDays": 14,
+    "contextBudgetChars": 3000
+  },
+  "nudge": { "afterHours": 4, "beforeDueHours": 4, "pollMinutes": 10 },
+  "weeklyRecap": {
+    "enabled": false,
+    "dayOfWeek": 0,
+    "pollMinutes": 15,
+    "model": "anthropic/claude-sonnet-4.5"
+  }
 }

@@ -10,7 +10,7 @@ export class StaticBankPromptSource implements PromptSource {
     if (bank.length === 0) throw new Error("Prompt bank is empty");
   }
 
-  nextPrompt(_date: string): Prompt {
+  async nextPrompt(_date: string): Promise<Prompt> {
     const used = this.ledger.usedPromptIds();
     let candidates = this.bank.filter((p) => !used.has(p.id));
     if (candidates.length === 0) {

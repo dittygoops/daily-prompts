@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { nextDispatchAt, todayInTz } from "../src/scheduler";
+import { mostRecentDayOfWeek, nextDispatchAt, todayInTz } from "../src/scheduler";
 
 const t = { hour: 8, minute: 30 };
 
@@ -42,5 +42,30 @@ describe("nextDispatchAt", () => {
     const now = new Date("2026-10-31T10:00:00-04:00");
     const next = nextDispatchAt(now, t, "America/New_York");
     expect(next.toISOString()).toBe(new Date("2026-11-01T08:30:00-05:00").toISOString());
+  });
+});
+
+describe("mostRecentDayOfWeek", () => {
+  test("today matches the target weekday: returns today", () => {
+    // 2026-07-19 is a Sunday
+    const now = new Date("2026-07-19T10:00:00-07:00");
+    expect(mostRecentDayOfWeek(now, 0, "America/Phoenix")).toBe("2026-07-19");
+  });
+
+  test("today is after the target weekday: returns this week's occurrence", () => {
+    // 2026-07-21 is a Tuesday; most recent Sunday is 2026-07-19
+    const now = new Date("2026-07-21T10:00:00-07:00");
+    expect(mostRecentDayOfWeek(now, 0, "America/Phoenix")).toBe("2026-07-19");
+  });
+
+  test("today is before the target weekday in the week: returns last week's occurrence", () => {
+    // 2026-07-16 is a Thursday; most recent Sunday is 2026-07-12
+    const now = new Date("2026-07-16T10:00:00-07:00");
+    expect(mostRecentDayOfWeek(now, 0, "America/Phoenix")).toBe("2026-07-12");
+  });
+
+  test("respects the timezone boundary near midnight", () => {
+    // 2026-07-20T05:00:00Z is still 2026-07-19 in Phoenix (UTC-7)
+    expect(mostRecentDayOfWeek(new Date("2026-07-20T05:00:00Z"), 0, "America/Phoenix")).toBe("2026-07-19");
   });
 });

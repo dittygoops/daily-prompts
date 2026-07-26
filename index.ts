@@ -4,7 +4,14 @@ import { Ledger } from "./src/ledger/ledger";
 import { SpectrumChannel } from "./src/channel/spectrum";
 import { EngineRuntime } from "./src/engine/runtime";
 import { StaticBankPromptSource } from "./src/prompts/staticBank";
+import { AdaptivePromptSource } from "./src/prompts/adaptive";
+import { FallbackPromptSource } from "./src/prompts/fallback";
 import { nextDispatchAt, todayInTz } from "./src/scheduler";
+import { OpenRouterClient } from "./src/llm/openrouter";
+import { SupermemoryClient } from "./src/memory/supermemory";
+import { processPending } from "./src/extraction/pipeline";
+import { checkAndSendNudges } from "./src/nudge/pipeline";
+import { checkAndSendWeeklyRecap } from "./src/recap/checker";
 
 const log = (msg: string) => console.error(`[${new Date().toISOString()}] ${msg}`);
 
@@ -21,11 +28,28 @@ const channel = await SpectrumChannel.connect({
   log,
 });
 
+// System 2 (memory) needs an LLM + memory client before System 3 (adaptive
+// prompt generation) can be constructed, which in turn is needed before
+// EngineRuntime; so these move ahead of runtime construction now.
+const extractionLlm = new OpenRouterClient(config.openrouter.apiKey, config.extraction.model);
+const generationLlm = new OpenRouterClient(config.openrouter.apiKey, config.generation.model);
+const memory = new SupermemoryClient(config.supermemory.baseUrl, config.supermemory.apiKey);
+
+const staticSource = new StaticBankPromptSource(bank, ledger);
+const adaptiveSource = new AdaptivePromptSource(memory, generationLlm, ledger, {
+  model: config.generation.model,
+  historyWindowDays: config.generation.historyWindowDays,
+  feedbackWindowDays: config.generation.feedbackWindowDays,
+  contextBudgetChars: config.generation.contextBudgetChars,
+  names: { a: config.participants.a.name, b: config.participants.b.name },
+});
+const promptSource = new FallbackPromptSource(adaptiveSource, staticSource, { ledger, log });
+
 const runtime = new EngineRuntime({
   names: { a: config.participants.a.name, b: config.participants.b.name },
   ledger,
   channel,
-  promptSource: new StaticBankPromptSource(bank, ledger),
+  promptSource,
   settleWindowSeconds: config.settleWindowSeconds,
   log,
 });
@@ -74,5 +98,112 @@ async function scheduleLoop(): Promise<never> {
   }
 }
 
+// Extraction (System 2): a side pipeline that must never take the daemon
+// down. Messaging is the core product function; a memory-pipeline bug or an
+// OpenRouter/Supermemory outage degrades gracefully (logged loudly, retried
+// on the next poll via the ledger's own attempt cap) rather than crashing.
+async function runExtraction(): Promise<void> {
+  try {
+    const result = await processPending({ ledger, llm: extractionLlm, memory, log });
+    if (result.processed > 0 || result.failed > 0) {
+      log(`extraction pass: ${result.processed} processed, ${result.failed} failed`);
+    }
+  } catch (err) {
+    // processPending isolates per-item failures internally; reaching here
+    // means a genuine bug (e.g. a ledger query itself throwing).
+    log(`EXTRACTION PASS FAILED: ${err}`);
+  }
+}
+
+async function extractionLoop(): Promise<never> {
+  while (true) {
+    await new Promise((resolve) => setTimeout(resolve, config.extraction.pollMinutes * 60_000));
+    // Per-iteration try/catch: runExtraction already can't throw, but this
+    // guarantees the loop itself can never die and silently stop polling.
+    try {
+      await runExtraction();
+    } catch (err) {
+      log(`extraction loop iteration crashed unexpectedly: ${err}`);
+    }
+  }
+}
+
+// Nudges: same side-pipeline philosophy as extraction — a poller that
+// reads the ledger and sends via the channel directly, never touching
+// EngineRuntime/the state machine, and never allowed to take the daemon
+// down.
+async function runNudgeCheck(): Promise<void> {
+  try {
+    const result = await checkAndSendNudges({
+      ledger,
+      channel,
+      names: { a: config.participants.a.name, b: config.participants.b.name },
+      dispatchTime: config.dispatchTime,
+      timezone: config.timezone,
+      afterHours: config.nudge.afterHours,
+      beforeDueHours: config.nudge.beforeDueHours,
+      log,
+    });
+    if (result.sent > 0) log(`nudge check: ${result.sent} sent`);
+  } catch (err) {
+    log(`NUDGE CHECK FAILED: ${err}`);
+  }
+}
+
+async function nudgeLoop(): Promise<never> {
+  while (true) {
+    await new Promise((resolve) => setTimeout(resolve, config.nudge.pollMinutes * 60_000));
+    try {
+      await runNudgeCheck();
+    } catch (err) {
+      log(`nudge loop iteration crashed unexpectedly: ${err}`);
+    }
+  }
+}
+
+// Weekly recap: optional (config.weeklyRecap.enabled). Triggered by state,
+// not a clock — a poller (same side-pipeline philosophy as extraction and
+// nudges) that fires once the target weekday's dispatch has actually
+// resolved, whether both answered, one did, or neither did (expired at the
+// next day's dispatch). No separate startup reconciliation needed: the
+// first poll tick after any downtime naturally catches up.
+const recapLlm = new OpenRouterClient(config.openrouter.apiKey, config.weeklyRecap.model);
+
+async function runRecapCheck(): Promise<void> {
+  try {
+    const result = await checkAndSendWeeklyRecap({
+      ledger,
+      channel,
+      llm: recapLlm,
+      names: { a: config.participants.a.name, b: config.participants.b.name },
+      model: config.weeklyRecap.model,
+      dayOfWeek: config.weeklyRecap.dayOfWeek,
+      timezone: config.timezone,
+      log,
+    });
+    if (result.sent) log(`weekly recap sent`);
+  } catch (err) {
+    log(`WEEKLY RECAP CHECK FAILED: ${err}`);
+  }
+}
+
+async function recapLoop(): Promise<never> {
+  while (true) {
+    await new Promise((resolve) => setTimeout(resolve, config.weeklyRecap.pollMinutes * 60_000));
+    try {
+      await runRecapCheck();
+    } catch (err) {
+      log(`recap loop iteration crashed unexpectedly: ${err}`);
+    }
+  }
+}
+
 await reconcile();
+await runExtraction(); // startup catch-up: drain any backlog before the main loop takes over
+void extractionLoop(); // fire-and-forget: runs concurrently with dispatch, never blocks it
+void nudgeLoop(); // fire-and-forget: same independence guarantee
+if (config.weeklyRecap.enabled) {
+  await runRecapCheck(); // startup catch-up, same as extraction's
+  void recapLoop();
+}
 await scheduleLoop();

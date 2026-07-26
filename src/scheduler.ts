@@ -42,7 +42,7 @@ function wallClockInstant(date: string, time: DispatchTime, timezone: string): D
   return guess;
 }
 
-function addDays(date: string, days: number): string {
+export function addDays(date: string, days: number): string {
   const d = new Date(`${date}T12:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
@@ -55,4 +55,24 @@ export function nextDispatchAt(now: Date, time: DispatchTime, timezone: string):
   const candidate = wallClockInstant(today, time, timezone);
   if (candidate.getTime() > now.getTime()) return candidate;
   return wallClockInstant(addDays(today, 1), time, timezone);
+}
+
+export function dayOfWeekInTz(date: string, timezone: string): number {
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: timezone, weekday: "short" }).format(
+    new Date(`${date}T12:00:00Z`),
+  );
+  return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(weekday);
+}
+
+/** The most recent date on or before `now` (in `timezone`) whose weekday is
+ * `dayOfWeek` (0=Sunday..6=Saturday). Date-only; no wall-clock time
+ * involved, since the weekly recap is triggered by that day's dispatch
+ * having resolved, not by a fixed clock time. */
+export function mostRecentDayOfWeek(now: Date, dayOfWeek: number, timezone: string): string {
+  let date = todayInTz(now, timezone);
+  for (let i = 0; i < 7; i++) {
+    if (dayOfWeekInTz(date, timezone) === dayOfWeek) return date;
+    date = addDays(date, -1);
+  }
+  throw new Error("mostRecentDayOfWeek: failed to converge"); // unreachable; every weekday occurs within 7 days
 }

@@ -13,6 +13,8 @@ const validRaw = {
 const validEnv = {
   SPECTRUM_PROJECT_ID: "proj-id",
   SPECTRUM_PROJECT_SECRET: "proj-secret",
+  OPENROUTER_API_KEY: "or-key",
+  SUPERMEMORY_API_KEY: "sm-key",
 };
 
 describe("loadConfig", () => {
@@ -25,6 +27,39 @@ describe("loadConfig", () => {
     expect(config.ledgerPath).toBe("./ledger.db");
     expect(config.spectrum.projectId).toBe("proj-id");
     expect(config.spectrum.projectSecret).toBe("proj-secret");
+    expect(config.extraction.model).toBe("google/gemini-2.5-flash");
+    expect(config.extraction.pollMinutes).toBe(5);
+    expect(config.generation.model).toBe("google/gemini-2.5-flash");
+    expect(config.generation.historyWindowDays).toBe(14);
+    expect(config.generation.feedbackWindowDays).toBe(14);
+    expect(config.generation.contextBudgetChars).toBe(3000);
+    expect(config.nudge.afterHours).toBe(4);
+    expect(config.nudge.beforeDueHours).toBe(4);
+    expect(config.nudge.pollMinutes).toBe(10);
+    expect(config.weeklyRecap.enabled).toBe(false);
+    expect(config.weeklyRecap.dayOfWeek).toBe(0);
+    expect(config.weeklyRecap.pollMinutes).toBe(15);
+    expect(config.weeklyRecap.model).toBe("google/gemini-2.5-flash");
+    expect(config.openrouter.apiKey).toBe("or-key");
+    expect(config.supermemory.apiKey).toBe("sm-key");
+    expect(config.supermemory.baseUrl).toBe("http://localhost:6767");
+  });
+
+  test("honors explicit extraction and supermemory overrides", () => {
+    const config = loadConfig(
+      { ...validRaw, extraction: { model: "google/gemini-2.5-flash-lite", pollMinutes: 10 } },
+      { ...validEnv, SUPERMEMORY_BASE_URL: "http://localhost:7000" },
+    );
+    expect(config.extraction.model).toBe("google/gemini-2.5-flash-lite");
+    expect(config.extraction.pollMinutes).toBe(10);
+    expect(config.supermemory.baseUrl).toBe("http://localhost:7000");
+  });
+
+  test("names the missing env var when OpenRouter or Supermemory keys are absent", () => {
+    const { OPENROUTER_API_KEY, ...rest } = validEnv;
+    expect(() => loadConfig(validRaw, rest)).toThrow(/OPENROUTER_API_KEY/);
+    const { SUPERMEMORY_API_KEY, ...rest2 } = validEnv;
+    expect(() => loadConfig(validRaw, rest2)).toThrow(/SUPERMEMORY_API_KEY/);
   });
 
   test("honors explicit overrides of defaulted fields", () => {

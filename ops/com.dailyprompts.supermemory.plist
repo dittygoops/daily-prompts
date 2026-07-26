@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dailyprompts.supermemory</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/apgupta/.local/bin/supermemory-server</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/apgupta/.supermemory</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SUPERMEMORY_DATA_DIR</key>
+    <string>/Users/apgupta/.supermemory/data</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/apgupta/Library/Logs/supermemory.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/apgupta/Library/Logs/supermemory.log</string>
+</dict>
+</plist>
