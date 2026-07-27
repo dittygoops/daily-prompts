@@ -18,6 +18,11 @@ CREATE TABLE IF NOT EXISTS person_days (
   finalized_at TEXT,
   share_sent_at TEXT,
   feedback_ask_sent_at TEXT,
+  -- The question is per person: a prompt built from one person's memory is
+  -- unanswerable by the other, which reached production once already.
+  -- days.prompt_text now holds the day's shared theme, not the question.
+  prompt_id TEXT,
+  prompt_text TEXT,
   PRIMARY KEY (day_id, person)
 );
 
@@ -60,6 +65,7 @@ CREATE TABLE IF NOT EXISTS generation_log (
   raw_response TEXT,
   rationale TEXT,
   stance TEXT,
+  person TEXT,
   fell_back INTEGER NOT NULL DEFAULT 0,
   fallback_reason TEXT,
   at TEXT NOT NULL

@@ -36,11 +36,73 @@ describe("schema migration", () => {
   });
 });
 
+describe("per-person prompts", () => {
+  test("createDay backfills each person's prompt from the day's prompt", () => {
+    // Until the generator produces two prompts, both people share one, so
+    // the per-person columns must never be empty for a freshly created day.
+    const day = ledger.createDay("2026-07-17", "p1", "shared question", "t");
+    expect(ledger.personDay(day.id, "a").prompt_text).toBe("shared question");
+    expect(ledger.personDay(day.id, "b").prompt_text).toBe("shared question");
+  });
+
+  test("setPersonPrompt stores a different question per person", () => {
+    const day = ledger.createDay("2026-07-17", "theme", "a shared theme", "t");
+    ledger.setPersonPrompt(day.id, "a", "gen-a", "How is the guitar going?");
+    ledger.setPersonPrompt(day.id, "b", "gen-b", "How did the party go?");
+    expect(ledger.personDay(day.id, "a").prompt_text).toBe("How is the guitar going?");
+    expect(ledger.personDay(day.id, "b").prompt_text).toBe("How did the party go?");
+    expect(ledger.personDay(day.id, "a").prompt_id).toBe("gen-a");
+  });
+
+  test("a migrated ledger backfills prompts onto rows that predate the columns", () => {
+    // person_days rows created before these columns existed would otherwise
+    // read null, and every consumer would need a null branch forever.
+    const path = join(tmpdir(), `daily-prompts-pp-${Date.now()}.db`);
+    try {
+      const old = new Database(path, { create: true, strict: true });
+      old.exec(`CREATE TABLE days (id INTEGER PRIMARY KEY, date TEXT NOT NULL UNIQUE, prompt_id TEXT NOT NULL,
+        prompt_text TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'dispatched', dispatched_at TEXT NOT NULL, resolved_at TEXT)`);
+      old.exec(`CREATE TABLE person_days (day_id INTEGER NOT NULL, person TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'awaiting',
+        response_text TEXT, finalized_at TEXT, share_sent_at TEXT, feedback_ask_sent_at TEXT, PRIMARY KEY (day_id, person))`);
+      old.exec(`INSERT INTO days (id,date,prompt_id,prompt_text,state,dispatched_at) VALUES (1,'2026-07-18','p9','legacy question','resolved_shared','t')`);
+      old.exec(`INSERT INTO person_days (day_id,person,state) VALUES (1,'a','answered'),(1,'b','answered')`);
+      old.close();
+
+      const migrated = Ledger.open(path);
+      expect(migrated.personDay(1, "a").prompt_text).toBe("legacy question");
+      expect(migrated.personDay(1, "b").prompt_text).toBe("legacy question");
+      expect(migrated.personDay(1, "a").state).toBe("answered"); // existing data survives
+    } finally {
+      for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
+    }
+  });
+
+  test("generation_log rows are attributable to a person", () => {
+    ledger.recordGeneration({
+      date: "2026-07-18", promptId: "gen-a", promptText: "How is the guitar going?",
+      model: "m", systemPrompt: "s", userPrompt: "u", rawResponse: "{}",
+      rationale: "r", stance: "exploit", person: "a",
+      fellBack: false, fallbackReason: null, at: "t",
+    });
+    expect(ledger.generationLogFor("2026-07-18")[0]!.person).toBe("a");
+  });
+
+  test("a fallback generation row has no person, since neither got a tailored prompt", () => {
+    ledger.recordGeneration({
+      date: "2026-07-18", promptId: null, promptText: null,
+      model: null, systemPrompt: null, userPrompt: null, rawResponse: null,
+      rationale: null, stance: null, person: null,
+      fellBack: true, fallbackReason: "LLM outage", at: "t",
+    });
+    expect(ledger.generationLogFor("2026-07-18")[0]!.person).toBeNull();
+  });
+});
+
 describe("prompt scores", () => {
   const gen = (date: string, text: string | null, fellBack = false) => ({
     date, promptId: text ? `gen-${date}` : null, promptText: text,
     model: "m", systemPrompt: "s", userPrompt: "u", rawResponse: "{}",
-    rationale: "r", stance: "explore", fellBack, fallbackReason: null, at: "t",
+    rationale: "r", stance: "explore", person: null, fellBack, fallbackReason: null, at: "t",
   });
 
   test("a generated prompt with no score row is pending", () => {
@@ -264,7 +326,7 @@ describe("generation_log", () => {
     ledger.recordGeneration({
       date: "2026-07-18", promptId: "gen-2026-07-18", promptText: "How did the defense go?",
       model: "m", systemPrompt: "sys", userPrompt: "usr", rawResponse: "{}",
-      rationale: "following up on the thesis thread", stance: "exploit",
+      rationale: "following up on the thesis thread", stance: "exploit", person: null,
       fellBack: false, fallbackReason: null, at: "t",
     });
     expect(ledger.generationLogFor("2026-07-18")[0]!.stance).toBe("exploit");
@@ -274,7 +336,7 @@ describe("generation_log", () => {
     ledger.recordGeneration({
       date: "2026-07-18", promptId: null, promptText: null,
       model: null, systemPrompt: null, userPrompt: null, rawResponse: null,
-      rationale: null, stance: null,
+      rationale: null, stance: null, person: null,
       fellBack: true, fallbackReason: "LLM outage", at: "t",
     });
     expect(ledger.generationLogFor("2026-07-18")[0]!.stance).toBeNull();
@@ -285,7 +347,7 @@ describe("generation_log", () => {
       date: "2026-07-18", promptId: "gen-2026-07-18", promptText: "What's on your mind?",
       model: "google/gemini-2.5-flash", systemPrompt: "sys", userPrompt: "usr",
       rawResponse: '{"prompt":"..."}', rationale: "exploit thesis thread",
-      stance: null,
+      stance: null, person: null,
       fellBack: false, fallbackReason: null, at: "t",
     });
     const rows = ledger.generationLogFor("2026-07-18");
@@ -298,7 +360,7 @@ describe("generation_log", () => {
       date: "2026-07-18", promptId: null, promptText: null,
       model: null, systemPrompt: null, userPrompt: null,
       rawResponse: null, rationale: null,
-      stance: null,
+      stance: null, person: null,
       fellBack: true, fallbackReason: "LLM outage", at: "t",
     });
     const rows = ledger.generationLogFor("2026-07-18");
@@ -309,7 +371,7 @@ describe("generation_log", () => {
     const entry = (date: string, promptText: string) => ({
       date, promptId: `gen-${date}`, promptText,
       model: "m", systemPrompt: "sys", userPrompt: "usr", rawResponse: "{}",
-      rationale: "r", stance: null, fellBack: false, fallbackReason: null, at: `${date}T08:00:00Z`,
+      rationale: "r", stance: null, person: null, fellBack: false, fallbackReason: null, at: `${date}T08:00:00Z`,
     });
     ledger.recordGeneration(entry("2026-07-20", "third"));
     ledger.recordGeneration(entry("2026-07-18", "first"));
@@ -321,12 +383,12 @@ describe("generation_log", () => {
     ledger.recordGeneration({
       date: "2026-07-18", promptId: "gen-2026-07-18", promptText: "ok",
       model: "m", systemPrompt: "sys", userPrompt: "usr", rawResponse: "{}",
-      rationale: "r", stance: null, fellBack: false, fallbackReason: null, at: "t1",
+      rationale: "r", stance: null, person: null, fellBack: false, fallbackReason: null, at: "t1",
     });
     ledger.recordGeneration({
       date: "2026-07-19", promptId: null, promptText: null,
       model: null, systemPrompt: null, userPrompt: null, rawResponse: null, rationale: null,
-      stance: null,
+      stance: null, person: null,
       fellBack: true, fallbackReason: "LLM outage", at: "t2",
     });
     expect(ledger.allGenerationLog().map((r) => r.fellBack)).toEqual([false, true]);

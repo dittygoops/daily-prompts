@@ -120,7 +120,7 @@ export class AdaptivePromptSource implements PromptSource {
         rawResponse: raw,
         rationale: shaped.data.rationale,
         stance, // the assigned stance, which is the ground truth of what was asked for
-
+        person: null, // still one shared prompt until per-person generation lands
         fellBack: false,
         fallbackReason: null,
         at,

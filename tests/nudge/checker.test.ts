@@ -16,6 +16,7 @@ function personDay(overrides: Partial<PersonDayRow> = {}): PersonDayRow {
   return {
     day_id: 1, person: "a", state: "awaiting", response_text: null,
     finalized_at: null, share_sent_at: null, feedback_ask_sent_at: null,
+    prompt_id: "p1", prompt_text: "x",
     ...overrides,
   };
 }

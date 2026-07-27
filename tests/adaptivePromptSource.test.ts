@@ -65,7 +65,7 @@ describe("AdaptivePromptSource", () => {
       model: "test-model",
       promptText: "What's a small win from today?",
       rationale: "test rationale",
-      stance: "explore",
+      stance: "explore", person: null,
       fellBack: false,
     });
   });

@@ -46,6 +46,10 @@ export interface PersonDayRow {
   finalized_at: string | null;
   share_sent_at: string | null;
   feedback_ask_sent_at: string | null;
+  /** The question this person was actually asked. Populated for every row,
+   * including migrated ones, so consumers never branch on null. */
+  prompt_id: string | null;
+  prompt_text: string | null;
 }
 
 export interface MessageRow {
@@ -70,6 +74,9 @@ export interface GenerationLogEntry {
   /** "explore" or "exploit", as declared by the generator. Null on fallback
    * rows, where no generator ran to declare anything. */
   stance: string | null;
+  /** Which person this prompt was generated for. Null on fallback rows,
+   * where neither person got a tailored prompt. */
+  person: PersonId | null;
   fellBack: boolean;
   fallbackReason: string | null;
   at: string;
@@ -108,7 +115,7 @@ interface GenerationLogDbRow {
   id: number; date: string; prompt_id: string | null; prompt_text: string | null;
   model: string | null; system_prompt: string | null; user_prompt: string | null;
   raw_response: string | null; rationale: string | null; stance: string | null;
-  fell_back: number; fallback_reason: string | null; at: string;
+  person: PersonId | null; fell_back: number; fallback_reason: string | null; at: string;
 }
 
 const toGenerationLogRow = (r: GenerationLogDbRow): GenerationLogRow => ({
@@ -122,6 +129,7 @@ const toGenerationLogRow = (r: GenerationLogDbRow): GenerationLogRow => ({
   rawResponse: r.raw_response,
   rationale: r.rationale,
   stance: r.stance,
+  person: r.person,
   fellBack: r.fell_back === 1,
   fallbackReason: r.fallback_reason,
   at: r.at,
@@ -173,10 +181,29 @@ export class Ledger {
    * would never reach the live database. Each step is guarded by its own
    * existence check so opening is idempotent. */
   private static migrateSchema(db: Database): void {
-    const columns = db.query("PRAGMA table_info(generation_log)").all() as { name: string }[];
-    if (!columns.some((c) => c.name === "stance")) {
+    const has = (table: string, column: string) =>
+      (db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).some((c) => c.name === column);
+
+    if (!has("generation_log", "stance")) {
       db.exec("ALTER TABLE generation_log ADD COLUMN stance TEXT");
     }
+    // One generation_log row per person once prompts differ. Nullable: a
+    // fallback row represents a day where no per-person generation happened.
+    if (!has("generation_log", "person")) {
+      db.exec("ALTER TABLE generation_log ADD COLUMN person TEXT");
+    }
+    if (!has("person_days", "prompt_id")) {
+      db.exec("ALTER TABLE person_days ADD COLUMN prompt_id TEXT");
+    }
+    if (!has("person_days", "prompt_text")) {
+      db.exec("ALTER TABLE person_days ADD COLUMN prompt_text TEXT");
+    }
+    // Backfill from the owning day so historical rows read correctly and no
+    // consumer needs a null branch for days that predate per-person prompts.
+    db.exec(`UPDATE person_days SET
+               prompt_id = COALESCE(prompt_id, (SELECT d.prompt_id FROM days d WHERE d.id = person_days.day_id)),
+               prompt_text = COALESCE(prompt_text, (SELECT d.prompt_text FROM days d WHERE d.id = person_days.day_id))
+             WHERE prompt_text IS NULL OR prompt_id IS NULL`);
   }
 
   static open(path: string): Ledger {
@@ -206,9 +233,12 @@ export class Ledger {
       )
       .get(date, promptId, promptText, dispatchedAt)!;
     for (const person of ["a", "b"] as const) {
+      // Seeded from the day's prompt so a day is never in a state where
+      // somebody has no question. setPersonPrompt overwrites when the
+      // generator produces a tailored one.
       this.db
-        .query(`INSERT INTO person_days (day_id, person) VALUES (?, ?)`)
-        .run(day.id, person);
+        .query(`INSERT INTO person_days (day_id, person, prompt_id, prompt_text) VALUES (?, ?, ?, ?)`)
+        .run(day.id, person, promptId, promptText);
     }
     return day;
   }
@@ -465,12 +495,20 @@ export class Ledger {
       .all(sinceDate);
   }
 
+  /** Replace one person's question, once the generator has produced a prompt
+   * tailored to their own memory. */
+  setPersonPrompt(dayId: number, person: PersonId, promptId: string, promptText: string): void {
+    this.db
+      .query(`UPDATE person_days SET prompt_id = ?, prompt_text = ? WHERE day_id = ? AND person = ?`)
+      .run(promptId, promptText, dayId, person);
+  }
+
   recordGeneration(entry: GenerationLogEntry): void {
     this.db
       .query(
         `INSERT INTO generation_log
-           (date, prompt_id, prompt_text, model, system_prompt, user_prompt, raw_response, rationale, stance, fell_back, fallback_reason, at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (date, prompt_id, prompt_text, model, system_prompt, user_prompt, raw_response, rationale, stance, person, fell_back, fallback_reason, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         entry.date,
@@ -482,6 +520,7 @@ export class Ledger {
         entry.rawResponse,
         entry.rationale,
         entry.stance,
+        entry.person,
         entry.fellBack ? 1 : 0,
         entry.fallbackReason,
         entry.at,
