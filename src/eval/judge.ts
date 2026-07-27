@@ -15,19 +15,30 @@ const judgmentSchema = z.object({
 
 export type Judgment = z.infer<typeof judgmentSchema>;
 
+/** One retry, matching AdaptivePromptSource: judges occasionally return a
+ * verdict with blank reasons or stray prose around the JSON, and a whole
+ * eval run should not die on one flaky completion. */
+const MAX_ATTEMPTS = 2;
+
 export async function judgePrompt(promptText: string, llm: LlmClient): Promise<Judgment> {
-  const raw = await llm.complete(JUDGE_SYSTEM_PROMPT, buildJudgeUserPrompt(promptText));
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error(`judgePrompt: LLM response was not valid JSON: ${raw.slice(0, 200)}`);
+  let lastError: Error | null = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const raw = await llm.complete(JUDGE_SYSTEM_PROMPT, buildJudgeUserPrompt(promptText));
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      lastError = new Error(`judgePrompt: LLM response was not valid JSON: ${raw.slice(0, 200)}`);
+      continue;
+    }
+    const shaped = judgmentSchema.safeParse(parsed);
+    if (!shaped.success) {
+      lastError = new Error(`judgePrompt: LLM response failed rubric schema: ${shaped.error.message}`);
+      continue;
+    }
+    return shaped.data;
   }
-  const shaped = judgmentSchema.safeParse(parsed);
-  if (!shaped.success) {
-    throw new Error(`judgePrompt: LLM response failed rubric schema: ${shaped.error.message}`);
-  }
-  return shaped.data;
+  throw lastError!;
 }
 
 export function passesAll(judgment: Judgment): boolean {

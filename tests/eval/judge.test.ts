@@ -13,6 +13,17 @@ function fakeLlm(response: string) {
   return { client, calls };
 }
 
+function scriptedLlm(responses: string[]) {
+  const calls: { system: string; user: string }[] = [];
+  const client: LlmClient = {
+    async complete(system, user) {
+      calls.push({ system, user });
+      return responses[calls.length - 1] ?? responses[responses.length - 1]!;
+    },
+  };
+  return { client, calls };
+}
+
 const allPass = JSON.stringify({
   answerable: true, answerableReason: "quick",
   singleQuestion: true, singleQuestionReason: "one question",
@@ -53,6 +64,43 @@ describe("judgePrompt", () => {
   test("throws when a required axis field is missing", async () => {
     const { client } = fakeLlm(JSON.stringify({ answerable: true }));
     await expect(judgePrompt("x", client)).rejects.toThrow();
+  });
+
+  test("rejects a judgment whose reasons are blank, since an unexplained verdict is not reviewable", async () => {
+    const { client } = fakeLlm(
+      JSON.stringify({
+        answerable: true, answerableReason: "",
+        singleQuestion: true, singleQuestionReason: "",
+        appropriateLength: true, appropriateLengthReason: "",
+        emotionallySafe: true, emotionallySafeReason: "",
+      }),
+    );
+    await expect(judgePrompt("x", client)).rejects.toThrow();
+  });
+
+  test("retries once when the first response is unparseable and succeeds on the second", async () => {
+    const { client, calls } = scriptedLlm(["```json oops", allPass]);
+    const result = await judgePrompt("x", client);
+    expect(result.answerable).toBe(true);
+    expect(calls.length).toBe(2);
+  });
+
+  test("retries once when the first response fails the schema", async () => {
+    const { client, calls } = scriptedLlm([JSON.stringify({ answerable: true }), allPass]);
+    await judgePrompt("x", client);
+    expect(calls.length).toBe(2);
+  });
+
+  test("does not retry a response that already parses", async () => {
+    const { client, calls } = scriptedLlm([allPass, allPass]);
+    await judgePrompt("x", client);
+    expect(calls.length).toBe(1);
+  });
+
+  test("gives up after the retry rather than looping", async () => {
+    const { client, calls } = fakeLlm("not json");
+    await expect(judgePrompt("x", client)).rejects.toThrow();
+    expect(calls.length).toBe(2);
   });
 
   test("passes(result) is true only when every axis passes", async () => {

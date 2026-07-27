@@ -23,3 +23,114 @@ export function findExactDuplicates(prompts: { id: string; text: string }[]): Du
   }
   return dupes;
 }
+
+/** Question scaffolding that nearly every check-in prompt shares. Left in,
+ * two unrelated questions look ~40% similar purely because both start
+ * "what's your"; removed, overlap only reflects subject matter. */
+const STOPWORDS = new Set([
+  "a", "an", "the", "and", "or", "but", "if", "of", "to", "in", "on", "at", "for", "from", "with", "by",
+  "what", "whats", "which", "who", "whos", "whom", "whose", "when", "where", "why", "how",
+  "is", "are", "was", "were", "be", "been", "being", "am",
+  "do", "does", "did", "done", "have", "has", "had",
+  "you", "your", "yours", "youve", "youd", "youre", "i", "me", "my", "we", "our", "us", "it", "its",
+  "that", "this", "these", "those", "there", "here",
+  "can", "could", "would", "should", "will", "shall", "may", "might", "must",
+  "one", "ever", "last", "just", "s", "t", "so", "as", "up", "out", "about", "like", "get",
+]);
+
+/** Lowercased, punctuation-stripped, stopword-free word set for a prompt.
+ * Deterministic and non-LLM by construction. */
+export function contentWords(text: string): Set<string> {
+  const words = text
+    .toLowerCase()
+    .replace(/[‘’']/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter((w) => w.length > 0 && !STOPWORDS.has(w));
+  return new Set(words);
+}
+
+/** Jaccard over content words. Chosen at 0.5 because check-in prompts are
+ * short (3-8 content words after stopword removal): at 0.5 two prompts must
+ * share at least half their combined subject vocabulary, which reliably
+ * catches restatements ("favorite thing to cook" vs "favorite thing you
+ * like to cook", 0.75) while leaving same-topic-different-question pairs
+ * ("best meal this month" vs "favorite thing to cook", 0.0) alone. Lower
+ * thresholds start flagging any two food questions; higher ones miss
+ * rewordings that only swap a single word. */
+export const NEAR_DUPLICATE_THRESHOLD = 0.5;
+
+/** How many leading words define a prompt's structural template. Four is
+ * enough to separate "what's one thing you're..." from "what's your
+ * favorite..." without collapsing every question starting "what's your". */
+const STEM_WORDS = 4;
+
+/** The normalized opening words of a prompt. Content-word Jaccard is blind
+ * to shared scaffolding by design, which means it cannot see a generator
+ * that keeps reaching for the same sentence template while varying only the
+ * subject. This is the complementary check for that failure mode. */
+export function openingStem(text: string, stemWords: number = STEM_WORDS): string {
+  return text
+    .toLowerCase()
+    .replace(/[‘’']/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .slice(0, stemWords)
+    .join(" ");
+}
+
+export interface RepeatedStem {
+  stem: string;
+  count: number;
+  texts: string[];
+}
+
+/** Opening templates used by more than one prompt, most-repeated first. */
+export function repeatedStems(texts: string[], stemWords: number = STEM_WORDS): RepeatedStem[] {
+  const groups = new Map<string, string[]>();
+  for (const text of texts) {
+    const stem = openingStem(text, stemWords);
+    groups.set(stem, [...(groups.get(stem) ?? []), text]);
+  }
+  return [...groups.entries()]
+    .filter(([, members]) => members.length > 1)
+    .map(([stem, members]) => ({ stem, count: members.length, texts: members }))
+    .sort((x, y) => y.count - x.count);
+}
+
+export interface NearestPriorMatch {
+  /** The prior prompt this candidate is closest to. */
+  text: string;
+  similarity: number;
+  isNearDuplicate: boolean;
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let shared = 0;
+  for (const w of a) if (b.has(w)) shared++;
+  return shared / (a.size + b.size - shared);
+}
+
+/** The closest match between a candidate prompt and the prompts that
+ * preceded it. Unlike the static bank's within-bank exact-duplicate check,
+ * this is the check that matters for generated prompts: System 3's whole
+ * purpose is not re-asking what it already asked. */
+export function nearestPrior(
+  candidate: string,
+  priors: string[],
+  threshold: number = NEAR_DUPLICATE_THRESHOLD,
+): NearestPriorMatch | null {
+  if (priors.length === 0) return null;
+  const candidateWords = contentWords(candidate);
+  let best: NearestPriorMatch = { text: priors[0]!, similarity: -1, isNearDuplicate: false };
+  for (const prior of priors) {
+    const similarity = jaccard(candidateWords, contentWords(prior));
+    if (similarity > best.similarity) {
+      best = { text: prior, similarity, isNearDuplicate: similarity >= threshold };
+    }
+  }
+  return best;
+}

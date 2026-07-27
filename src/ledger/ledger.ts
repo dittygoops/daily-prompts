@@ -76,6 +76,28 @@ export interface GenerationLogRow extends GenerationLogEntry {
   id: number;
 }
 
+interface GenerationLogDbRow {
+  id: number; date: string; prompt_id: string | null; prompt_text: string | null;
+  model: string | null; system_prompt: string | null; user_prompt: string | null;
+  raw_response: string | null; rationale: string | null; fell_back: number;
+  fallback_reason: string | null; at: string;
+}
+
+const toGenerationLogRow = (r: GenerationLogDbRow): GenerationLogRow => ({
+  id: r.id,
+  date: r.date,
+  promptId: r.prompt_id,
+  promptText: r.prompt_text,
+  model: r.model,
+  systemPrompt: r.system_prompt,
+  userPrompt: r.user_prompt,
+  rawResponse: r.raw_response,
+  rationale: r.rationale,
+  fellBack: r.fell_back === 1,
+  fallbackReason: r.fallback_reason,
+  at: r.at,
+});
+
 export interface PromptIdeaRow {
   id: number;
   person: PersonId;
@@ -426,30 +448,19 @@ export class Ledger {
 
   generationLogFor(date: string): GenerationLogRow[] {
     const rows = this.db
-      .query<
-        {
-          id: number; date: string; prompt_id: string | null; prompt_text: string | null;
-          model: string | null; system_prompt: string | null; user_prompt: string | null;
-          raw_response: string | null; rationale: string | null; fell_back: number;
-          fallback_reason: string | null; at: string;
-        },
-        [string]
-      >(`SELECT * FROM generation_log WHERE date = ? ORDER BY id`)
+      .query<GenerationLogDbRow, [string]>(`SELECT * FROM generation_log WHERE date = ? ORDER BY id`)
       .all(date);
-    return rows.map((r) => ({
-      id: r.id,
-      date: r.date,
-      promptId: r.prompt_id,
-      promptText: r.prompt_text,
-      model: r.model,
-      systemPrompt: r.system_prompt,
-      userPrompt: r.user_prompt,
-      rawResponse: r.raw_response,
-      rationale: r.rationale,
-      fellBack: r.fell_back === 1,
-      fallbackReason: r.fallback_reason,
-      at: r.at,
-    }));
+    return rows.map(toGenerationLogRow);
+  }
+
+  /** Every generation attempt ever recorded, oldest first. Powers the
+   * offline eval harness, which scores generated prompts against the
+   * history that preceded each one. */
+  allGenerationLog(): GenerationLogRow[] {
+    const rows = this.db
+      .query<GenerationLogDbRow, []>(`SELECT * FROM generation_log ORDER BY date, id`)
+      .all();
+    return rows.map(toGenerationLogRow);
   }
 
   /** Record a prompt idea a participant suggested (via feedback). Returns

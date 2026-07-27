@@ -208,6 +208,36 @@ describe("generation_log", () => {
     const rows = ledger.generationLogFor("2026-07-18");
     expect(rows[0]).toMatchObject({ fellBack: true, fallbackReason: "LLM outage", model: null });
   });
+
+  test("allGenerationLog returns every row across dates, oldest first", () => {
+    const entry = (date: string, promptText: string) => ({
+      date, promptId: `gen-${date}`, promptText,
+      model: "m", systemPrompt: "sys", userPrompt: "usr", rawResponse: "{}",
+      rationale: "r", fellBack: false, fallbackReason: null, at: `${date}T08:00:00Z`,
+    });
+    ledger.recordGeneration(entry("2026-07-20", "third"));
+    ledger.recordGeneration(entry("2026-07-18", "first"));
+    ledger.recordGeneration(entry("2026-07-19", "second"));
+    expect(ledger.allGenerationLog().map((r) => r.promptText)).toEqual(["first", "second", "third"]);
+  });
+
+  test("allGenerationLog includes fallback rows alongside successful ones", () => {
+    ledger.recordGeneration({
+      date: "2026-07-18", promptId: "gen-2026-07-18", promptText: "ok",
+      model: "m", systemPrompt: "sys", userPrompt: "usr", rawResponse: "{}",
+      rationale: "r", fellBack: false, fallbackReason: null, at: "t1",
+    });
+    ledger.recordGeneration({
+      date: "2026-07-19", promptId: null, promptText: null,
+      model: null, systemPrompt: null, userPrompt: null, rawResponse: null, rationale: null,
+      fellBack: true, fallbackReason: "LLM outage", at: "t2",
+    });
+    expect(ledger.allGenerationLog().map((r) => r.fellBack)).toEqual([false, true]);
+  });
+
+  test("allGenerationLog is empty on a fresh ledger", () => {
+    expect(ledger.allGenerationLog()).toEqual([]);
+  });
 });
 
 describe("prompt_ideas", () => {
