@@ -304,7 +304,9 @@ describe("per-person prompts", () => {
       },
       theme: "things you have been practising",
     });
-    const sends = result.effects.filter((e) => e.type === "Send" && e.kind === "prompt");
+    const sends = result.effects.filter(
+      (e): e is Extract<typeof e, { type: "Send" }> => e.type === "Send" && e.kind === "prompt",
+    );
     expect(sends).toHaveLength(2);
     expect(sends.find((s) => s.person === "a")!.text).toContain("How is the guitar going?");
     expect(sends.find((s) => s.person === "b")!.text).toContain("How did the party go?");
@@ -324,11 +326,13 @@ describe("per-person prompts", () => {
       theme: null,
     }).state;
     state = machine.step(state, { type: "InboundText", person: "a", text: "slowly", at: "t1" }).state;
-    state = machine.step(state, { type: "SettleElapsed", person: "a", at: "t2", gen: 1 }).state;
+    state = machine.step(state, { type: "SettleElapsed", person: "a", at: "t2", generation: 1 }).state;
     state = machine.step(state, { type: "InboundText", person: "b", text: "it was great", at: "t3" }).state;
-    const result = machine.step(state, { type: "SettleElapsed", person: "b", at: "t4", gen: 1 });
+    const result = machine.step(state, { type: "SettleElapsed", person: "b", at: "t4", generation: 1 });
 
-    const shares = result.effects.filter((e) => e.type === "Send" && e.kind === "share");
+    const shares = result.effects.filter(
+      (e): e is Extract<typeof e, { type: "Send" }> => e.type === "Send" && e.kind === "share",
+    );
     const toA = shares.find((s) => s.person === "a")!;
     // Without the question, an answer to an unseen prompt is meaningless.
     expect(toA.text).toContain("How did the party go?");

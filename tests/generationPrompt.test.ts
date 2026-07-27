@@ -112,14 +112,14 @@ describe("explore/exploit stance", () => {
         {
           date: "2026-07-25",
           stance: "explore",
-          a: { text: "What's one thing you're improving?", outcome: "answered", responseLength: 40 },
-          b: { text: "What's one thing you're improving?", outcome: "answered", responseLength: 30 },
+          a: { text: "What's one thing you're improving?", outcome: "answered", stance: null, responseLength: 40 },
+          b: { text: "What's one thing you're improving?", outcome: "answered", stance: null, responseLength: 30 },
         },
         {
           date: "2026-07-24",
           stance: "explore",
-          a: { text: "What's one thing you're learning?", outcome: "answered", responseLength: 20 },
-          b: { text: "What's one thing you're learning?", outcome: "skipped", responseLength: null },
+          a: { text: "What's one thing you're learning?", outcome: "answered", stance: null, responseLength: 20 },
+          b: { text: "What's one thing you're learning?", outcome: "skipped", stance: null, responseLength: null },
         },
       ],
     });
@@ -175,8 +175,8 @@ describe("buildGenerationUserPrompt", () => {
         {
           date: "2026-07-19",
           stance: null,
-          a: { text: "What game could you play forever?", outcome: "answered", responseLength: 120 },
-          b: { text: "What show would you rewatch forever?", outcome: "skipped", responseLength: null },
+          a: { text: "What game could you play forever?", outcome: "answered", stance: null, responseLength: 120 },
+          b: { text: "What show would you rewatch forever?", outcome: "skipped", stance: null, responseLength: null },
         },
       ],
     });

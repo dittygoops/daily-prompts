@@ -30,7 +30,7 @@ describe("recentPromptHistory", () => {
     ledger.finalizeResponse(day.id, "a", "answered", "t1");
     // b never answered; day resolved partial by the caller elsewhere
     const history = recentPromptHistory(ledger, "2026-07-17", 10);
-    expect(history[0]!.b).toEqual({ text: "x", outcome: "no_response", responseLength: null });
+    expect(history[0]!.b).toEqual({ text: "x", stance: null, outcome: "no_response", responseLength: null });
   });
 
   test("respects the window limit", () => {
@@ -58,5 +58,47 @@ describe("recentPromptHistory", () => {
     const history = recentPromptHistory(ledger, "2026-07-17", 10);
     expect(history[0]!.a.text).toBe("A's own question");
     expect(history[0]!.b.text).toBe("B's own question");
+  });
+});
+
+describe("per-person stance", () => {
+  const gen = (date: string, person: "a" | "b" | null, stance: string) => ({
+    date, promptId: `gen-${date}-${person ?? "x"}`, promptText: "q",
+    model: "m", systemPrompt: "s", userPrompt: "u", rawResponse: "{}",
+    rationale: "r", stance, person, fellBack: false, fallbackReason: null, at: "t",
+  });
+
+  test("each person's stance comes from their own generation row", () => {
+    const ledger = Ledger.open(":memory:");
+    const day = ledger.createDay("2026-07-19", "p1", "theme", "t");
+    ledger.resolveDay(day.id, "resolved_shared", "t2");
+    ledger.recordGeneration(gen("2026-07-19", "a", "exploit"));
+    ledger.recordGeneration(gen("2026-07-19", "b", "explore"));
+    const [entry] = recentPromptHistory(ledger, "2026-07-20", 14);
+    expect(entry!.a.stance).toBe("exploit");
+    expect(entry!.b.stance).toBe("explore");
+  });
+
+  test("the day counts as an exploit day if either person exploited", () => {
+    // decideStance reads these back to drive the 1-in-3 cadence, and
+    // stanceForPerson only ever downgrades an exploit to explore, so the
+    // day's intent is exploit even when one person could not follow it.
+    const ledger = Ledger.open(":memory:");
+    const day = ledger.createDay("2026-07-19", "p1", "theme", "t");
+    ledger.resolveDay(day.id, "resolved_shared", "t2");
+    ledger.recordGeneration(gen("2026-07-19", "a", "explore"));
+    ledger.recordGeneration(gen("2026-07-19", "b", "exploit"));
+    expect(recentPromptHistory(ledger, "2026-07-20", 14)[0]!.stance).toBe("exploit");
+  });
+
+  test("a legacy row with no person applies to both people", () => {
+    const ledger = Ledger.open(":memory:");
+    const day = ledger.createDay("2026-07-19", "p1", "shared question", "t");
+    ledger.resolveDay(day.id, "resolved_shared", "t2");
+    ledger.recordGeneration(gen("2026-07-19", null, "exploit"));
+    const [entry] = recentPromptHistory(ledger, "2026-07-20", 14);
+    expect(entry!.stance).toBe("exploit");
+    expect(entry!.a.stance).toBe("exploit");
+    expect(entry!.b.stance).toBe("exploit");
   });
 });

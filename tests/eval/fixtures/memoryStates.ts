@@ -35,7 +35,7 @@ const noResponse = { outcome: "no_response" as const, responseLength: null };
 /** Historical days predate per-person prompts, so both people's side of a
  * fixture day carries the same question. */
 const shared = (date: string, text: string, a: EnergySignal, b: EnergySignal, stance: string | null = null): PromptHistoryEntry =>
-  ({ date, stance, a: { ...a, text }, b: { ...b, text } });
+  ({ date, stance, a: { ...a, text, stance }, b: { ...b, text, stance } });
 
 const base = (over: Partial<GenerationInput>): GenerationInput => ({
   today: "2026-07-20",

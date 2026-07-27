@@ -12,30 +12,41 @@ export interface EnergySignal {
  * they answered it. Per person because the two now differ. */
 export interface PersonPromptHistory extends EnergySignal {
   text: string;
+  /** The stance assigned to THIS person that day. Person-level because the
+   * two can differ: stanceForPerson downgrades an exploit to explore for a
+   * person with no open threads. */
+  stance: string | null;
 }
 
 export interface PromptHistoryEntry {
   date: string;
-  /** The stance the generator declared that day, so it can see its own
-   * drift toward one side. Null for days predating the stance field or
-   * served by the static-bank fallback. */
+  /** The day's stance, which is what decideStance reads back to drive the
+   * 1-in-3 cadence. A day counts as an exploit day if EITHER person
+   * exploited, since stanceForPerson only ever downgrades. Null for days
+   * predating the stance field or served by the static-bank fallback. */
   stance: string | null;
   a: PersonPromptHistory;
   b: PersonPromptHistory;
 }
 
-function personHistoryFor(ledger: Ledger, dayId: number, person: PersonId, dayPromptText: string): PersonPromptHistory {
+function personHistoryFor(
+  ledger: Ledger,
+  dayId: number,
+  person: PersonId,
+  dayPromptText: string,
+  stance: string | null,
+): PersonPromptHistory {
   const pd = ledger.personDay(dayId, person);
   // person_days is seeded from the day at creation time, so the fallback to
   // dayPromptText only matters for rows written before that seeding existed.
   const text = pd.prompt_text ?? dayPromptText;
   if (pd.state === "answered") {
-    return { text, outcome: "answered", responseLength: pd.response_text?.length ?? 0 };
+    return { text, stance, outcome: "answered", responseLength: pd.response_text?.length ?? 0 };
   }
   if (pd.state === "skipped") {
-    return { text, outcome: "skipped", responseLength: null };
+    return { text, stance, outcome: "skipped", responseLength: null };
   }
-  return { text, outcome: "no_response", responseLength: null };
+  return { text, stance, outcome: "no_response", responseLength: null };
 }
 
 /** Recent dispatched prompts before `date`, most-recent first, with each
@@ -47,10 +58,18 @@ export function recentPromptHistory(
   date: string,
   windowDays: number,
 ): PromptHistoryEntry[] {
-  return ledger.recentDays(date, windowDays).map((day) => ({
-    date: day.date,
-    stance: ledger.generationLogFor(day.date)[0]?.stance ?? null,
-    a: personHistoryFor(ledger, day.id, "a", day.prompt_text),
-    b: personHistoryFor(ledger, day.id, "b", day.prompt_text),
-  }));
+  return ledger.recentDays(date, windowDays).map((day) => {
+    const rows = ledger.generationLogFor(day.date);
+    // A row with no person predates per-person generation and applies to
+    // both; taking rows[0] blindly would label B's question with A's stance.
+    const legacy = rows.find((r) => r.person === null)?.stance ?? null;
+    const stanceFor = (person: PersonId) =>
+      rows.find((r) => r.person === person)?.stance ?? legacy;
+    return {
+      date: day.date,
+      stance: rows.some((r) => r.stance === "exploit") ? "exploit" : (rows.find((r) => r.stance)?.stance ?? null),
+      a: personHistoryFor(ledger, day.id, "a", day.prompt_text, stanceFor("a")),
+      b: personHistoryFor(ledger, day.id, "b", day.prompt_text, stanceFor("b")),
+    };
+  });
 }
