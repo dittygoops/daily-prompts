@@ -26,12 +26,13 @@ describe("memory-state fixtures", () => {
     }
   });
 
-  test("every fixture renders both people's sections and a history section", () => {
+  test("every fixture renders both people's sections and their own history list", () => {
     for (const s of memoryStates) {
       const rendered = buildGenerationUserPrompt(s.input);
-      expect(rendered).toContain(`${s.input.names.a}'s context:`);
-      expect(rendered).toContain(`${s.input.names.b}'s context:`);
-      expect(rendered).toContain("Recent prompt history");
+      expect(rendered).toContain(`PERSON A: ${s.input.names.a}`);
+      expect(rendered).toContain(`PERSON B: ${s.input.names.b}`);
+      expect(rendered).toContain(`Questions ${s.input.names.a} was recently asked`);
+      expect(rendered).toContain(`Questions ${s.input.names.b} was recently asked`);
       expect(rendered).toContain(`Today is ${s.input.today}`);
     }
   });
@@ -65,8 +66,9 @@ describe("day-one-empty", () => {
     expect(rendered).toContain("Topics already covered: (none yet");
   });
 
-  test("signals day one explicitly in the history section", () => {
-    expect(render("day-one-empty")).toContain("this may be day one");
+  test("signals day one explicitly in each person's history section", () => {
+    const rendered = render("day-one-empty");
+    expect(rendered.split("this may be day one").length - 1).toBe(2);
   });
 });
 
@@ -79,14 +81,15 @@ describe("one-sided", () => {
 
   test("the empty person still gets placeholders and an empty coverage list", () => {
     const rendered = render("one-sided");
-    const samSection = rendered.slice(rendered.indexOf("Sam's context:"));
+    const samSection = rendered.slice(rendered.indexOf("PERSON B: Sam"));
     expect(samSection).toContain("Facts: (none yet)");
     expect(samSection).toContain("Topics already covered: (none yet");
   });
 
-  test("the non-answering person shows as no_response in every history line", () => {
+  test("the non-answering person shows as no_response in every one of their own history lines", () => {
     const rendered = render("one-sided");
-    expect(rendered.split("Sam: no_response").length - 1).toBe(2);
+    const samSection = rendered.slice(rendered.indexOf("PERSON B: Sam"));
+    expect(samSection.split("(no_response)").length - 1).toBe(2);
   });
 });
 
@@ -101,34 +104,41 @@ describe("rich-both", () => {
     }
   });
 
-  test("every prior prompt is listed with its date so the model can avoid repeats", () => {
+  test("every prior question is listed with its date, under each person's own history, so the model can avoid repeats", () => {
     const { input } = memoryState("rich-both");
     const rendered = buildGenerationUserPrompt(input);
     for (const h of input.history) {
-      expect(rendered).toContain(`[${h.date}] "${h.text}"`);
+      expect(rendered).toContain(`[${h.date}] "${h.a.text}"`);
+      expect(rendered).toContain(`[${h.date}] "${h.b.text}"`);
     }
   });
 
   test("answered history lines carry the response length as an energy signal", () => {
-    expect(render("rich-both")).toContain("Alex: answered (220 chars)");
+    const rendered = render("rich-both");
+    const alexSection = rendered.slice(rendered.indexOf("PERSON A: Alex"), rendered.indexOf("PERSON B: Sam"));
+    expect(alexSection).toContain("(answered, 220 chars)");
   });
 
   test("skipped history lines carry no length", () => {
-    expect(render("rich-both")).toContain("Sam: skipped");
-    expect(render("rich-both")).not.toContain("skipped (");
+    const rendered = render("rich-both");
+    const samSection = rendered.slice(rendered.indexOf("PERSON B: Sam"));
+    expect(samSection).toContain("(skipped)");
+    expect(rendered).not.toContain("skipped,");
   });
 });
 
 describe("heavy-thread", () => {
   test("the heavy thread is surfaced to the model under Open threads, not hidden", () => {
     const rendered = render("heavy-thread");
-    const samSection = rendered.slice(rendered.indexOf("Sam's context:"));
+    const samSection = rendered.slice(rendered.indexOf("PERSON B: Sam"));
     const threadsLine = samSection.split("\n").find((l) => l.includes("Open threads:"))!;
     expect(threadsLine).toContain("laid off on Friday");
   });
 
-  test("the low-energy reply that followed the heavy event is visible in history", () => {
-    expect(render("heavy-thread")).toContain("Sam: answered (12 chars)");
+  test("the low-energy reply that followed the heavy event is visible in Sam's own history", () => {
+    const rendered = render("heavy-thread");
+    const samSection = rendered.slice(rendered.indexOf("PERSON B: Sam"));
+    expect(samSection).toContain("(answered, 12 chars)");
   });
 });
 
@@ -137,7 +147,7 @@ describe("private-asymmetry", () => {
     const rendered = render("private-asymmetry");
     const secret = "Quietly interviewing at another company";
     expect(rendered.split(secret).length - 1).toBe(1);
-    const alexSection = rendered.slice(rendered.indexOf("Alex's context:"), rendered.indexOf("Sam's context:"));
+    const alexSection = rendered.slice(rendered.indexOf("PERSON A: Alex"), rendered.indexOf("PERSON B: Sam"));
     expect(alexSection).toContain(secret);
   });
 
@@ -165,7 +175,7 @@ describe("feedback-constrained", () => {
 
   test("the over-long prompt that triggered the feedback is in history verbatim", () => {
     const { input } = memoryState("feedback-constrained");
-    expect(buildGenerationUserPrompt(input)).toContain(input.history[0]!.text);
+    expect(buildGenerationUserPrompt(input)).toContain(input.history[0]!.a.text);
   });
 });
 
@@ -202,12 +212,13 @@ describe("low-energy-history", () => {
 
   test("no_response renders without a length, distinct from a zero-length answer", () => {
     const rendered = render("low-energy-history");
-    expect(rendered).toContain("Alex: no_response,");
+    const alexSection = rendered.slice(rendered.indexOf("PERSON A: Alex"), rendered.indexOf("PERSON B: Sam"));
+    expect(alexSection).toContain("(no_response)");
   });
 });
 
 describe("conflicting-preferences", () => {
-  test("both opposing preferences are present, so the conflict is the model's to resolve", () => {
+  test("both people's own preferences are present in their own section", () => {
     const rendered = render("conflicting-preferences");
     expect(rendered).toContain("Wants questions with more depth.");
     expect(rendered).toContain("Wants questions that stay light and silly.");

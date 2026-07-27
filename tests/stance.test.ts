@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { decideStance } from "../src/prompts/stance";
+import { decideStance, stanceForPerson } from "../src/prompts/stance";
 
 describe("decideStance", () => {
   test("explores when there is nothing to follow up on", () => {
@@ -36,5 +36,23 @@ describe("decideStance", () => {
       stances.unshift(decideStance({ recentStances: stances, hasThreads: true }));
     }
     expect(stances.filter((s) => s === "exploit").length).toBe(3);
+  });
+});
+
+describe("stanceForPerson", () => {
+  test("a person with threads follows the day's exploit stance", () => {
+    expect(stanceForPerson("exploit", true)).toBe("exploit");
+  });
+
+  test("a person with no threads explores even on an exploit day", () => {
+    expect(stanceForPerson("exploit", false)).toBe("explore");
+  });
+
+  test("a person with threads still explores on an explore day", () => {
+    expect(stanceForPerson("explore", true)).toBe("explore");
+  });
+
+  test("a person with no threads explores on an explore day", () => {
+    expect(stanceForPerson("explore", false)).toBe("explore");
   });
 });

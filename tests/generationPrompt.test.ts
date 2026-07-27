@@ -14,7 +14,8 @@ const richContext: PersonContext = {
 
 const baseInput = {
   today: "2026-07-20",
-  stance: "explore" as const,
+  stanceA: "explore" as const,
+  stanceB: "explore" as const,
   names: { a: "Alex", b: "Sam" } as const,
   contextA: emptyContext,
   contextB: emptyContext,
@@ -56,9 +57,26 @@ describe("ADAPTIVE_SYSTEM_PROMPT", () => {
     expect(ADAPTIVE_SYSTEM_PROMPT).toContain("usedIdeaId");
   });
 
-  test("instructs that both people always get the identical prompt", () => {
+  test("each person's question is built from their own memory", () => {
     const sys = ADAPTIVE_SYSTEM_PROMPT.toLowerCase();
-    expect(sys).toMatch(/identical|same prompt|both/);
+    expect(sys).toMatch(/their own memory/i);
+    expect(sys).toMatch(/own threads/i);
+  });
+
+  test("requires the two questions to share a theme", () => {
+    const sys = ADAPTIVE_SYSTEM_PROMPT.toLowerCase();
+    expect(sys).toMatch(/theme/i);
+    expect(ADAPTIVE_SYSTEM_PROMPT).toContain('"theme"');
+  });
+
+  test("forbids leaking one person's private thread into the other's question", () => {
+    const sys = ADAPTIVE_SYSTEM_PROMPT.toLowerCase();
+    expect(sys).toMatch(/leak|in confidence/i);
+  });
+
+  test("the JSON shape carries a prompt and stance per person", () => {
+    expect(ADAPTIVE_SYSTEM_PROMPT).toContain('"a":{"prompt"');
+    expect(ADAPTIVE_SYSTEM_PROMPT).toContain('"b":{"prompt"');
   });
 });
 
@@ -77,7 +95,7 @@ describe("explore/exploit stance", () => {
   });
 
   test("renders the assigned stance prominently in the user prompt", () => {
-    const user = buildGenerationUserPrompt({ ...baseInput, stance: "exploit" });
+    const user = buildGenerationUserPrompt({ ...baseInput, stanceA: "exploit" });
     expect(user).toContain("EXPLOIT");
   });
 
@@ -91,8 +109,18 @@ describe("explore/exploit stance", () => {
     const user = buildGenerationUserPrompt({
       ...baseInput,
       history: [
-        { date: "2026-07-25", text: "What's one thing you're improving?", stance: "explore", a: { outcome: "answered", responseLength: 40 }, b: { outcome: "answered", responseLength: 30 } },
-        { date: "2026-07-24", text: "What's one thing you're learning?", stance: "explore", a: { outcome: "answered", responseLength: 20 }, b: { outcome: "skipped", responseLength: null } },
+        {
+          date: "2026-07-25",
+          stance: "explore",
+          a: { text: "What's one thing you're improving?", outcome: "answered", responseLength: 40 },
+          b: { text: "What's one thing you're improving?", outcome: "answered", responseLength: 30 },
+        },
+        {
+          date: "2026-07-24",
+          stance: "explore",
+          a: { text: "What's one thing you're learning?", outcome: "answered", responseLength: 20 },
+          b: { text: "What's one thing you're learning?", outcome: "skipped", responseLength: null },
+        },
       ],
     });
     expect(user).toMatch(/explore/i);
@@ -140,21 +168,25 @@ describe("buildGenerationUserPrompt", () => {
     expect(user).toContain("sports");
   });
 
-  test("includes recent prompt history with per-person outcome and response length", () => {
+  test("includes recent prompt history with per-person outcome and response length, under each person's own section", () => {
     const user = buildGenerationUserPrompt({
       ...baseInput,
       history: [
         {
           date: "2026-07-19",
-          text: "What game could you play forever?",
-          a: { outcome: "answered", responseLength: 120 },
-          b: { outcome: "skipped", responseLength: null },
+          stance: null,
+          a: { text: "What game could you play forever?", outcome: "answered", responseLength: 120 },
+          b: { text: "What show would you rewatch forever?", outcome: "skipped", responseLength: null },
         },
-      ] as never,
+      ],
     });
     expect(user).toContain("What game could you play forever?");
+    expect(user).toContain("What show would you rewatch forever?");
     expect(user).toContain("answered");
     expect(user).toContain("skipped");
+    const alexSection = user.slice(user.indexOf("PERSON A:"), user.indexOf("PERSON B:"));
+    expect(alexSection).toContain("What game could you play forever?");
+    expect(alexSection).not.toContain("What show would you rewatch forever?");
   });
 
   test("includes raw recent feedback text per person", () => {
@@ -177,16 +209,5 @@ describe("buildGenerationUserPrompt", () => {
     expect(user).toContain("Alex");
     expect(user).toContain("Sam");
     expect(user.length).toBeGreaterThan(0);
-  });
-});
-
-describe("both-answerable constraint", () => {
-  test("requires an exploit to be answerable by both people", () => {
-    // Live failure 2026-07-27: "How did the psychic reading party with Cora
-    // and her mom end up going?" was built on one person's thread, leaving
-    // the other with no way to respond to their own daily question.
-    const sys = ADAPTIVE_SYSTEM_PROMPT.toLowerCase();
-    expect(sys).toMatch(/both people must be able to answer/);
-    expect(sys).toMatch(/widen|shared category|different thread/);
   });
 });

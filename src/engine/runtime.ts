@@ -2,7 +2,7 @@ import type { PersonId } from "../config";
 import type { Channel } from "../channel/types";
 import type { Ledger } from "../ledger/ledger";
 import type { PromptSource } from "../prompts/types";
-import { DayMachine, type Effect, type Event, type MachineState } from "./stateMachine";
+import { DayMachine, type Effect, type Event, type MachineState, type PromptRef } from "./stateMachine";
 import { SettleTimers, type TimerClock } from "./settle";
 
 export interface EngineRuntimeOptions {
@@ -52,8 +52,14 @@ export class EngineRuntime {
    * interleave. Unlike fire-and-forget inbound handling, failures propagate
    * to the caller so a broken dispatch is loud. */
   async dispatch(date: string): Promise<void> {
-    const prompt = await this.opts.promptSource.nextPrompt(date);
-    await this.enqueue({ type: "DispatchDue", date, at: this.now(), prompt });
+    const daily = await this.opts.promptSource.nextPrompts(date);
+    await this.enqueue({
+      type: "DispatchDue",
+      date,
+      at: this.now(),
+      prompts: daily.prompts,
+      theme: daily.theme,
+    });
   }
 
   /** Serialize event handling so effects never interleave. Returns the
@@ -93,8 +99,16 @@ export class EngineRuntime {
     const ledger = this.opts.ledger;
     switch (effect.type) {
       case "CreateDay": {
-        const day = ledger.createDay(effect.date, effect.prompt.id, effect.prompt.text, effect.at);
-        ledger.markPromptUsed(effect.prompt.id, effect.date);
+        // days.prompt_text holds the shared theme, not a question anybody was
+        // asked. The questions themselves live per person, since they differ.
+        const themeId = effect.prompts.a.id;
+        const themeText = effect.theme ?? effect.prompts.a.text;
+        const day = ledger.createDay(effect.date, themeId, themeText, effect.at);
+        for (const person of ["a", "b"] as const) {
+          const p = effect.prompts[person];
+          ledger.setPersonPrompt(day.id, person, p.id, p.text);
+          ledger.markPromptUsed(p.id, effect.date);
+        }
         this.currentDayId = day.id;
         break;
       }
@@ -185,7 +199,8 @@ export class EngineRuntime {
       return {
         day: {
           date: latest.date,
-          prompt: { id: latest.prompt_id, text: latest.prompt_text },
+          prompts: this.promptsFor(latest),
+          theme: latest.prompt_text,
           resolved: true,
           persons: {
             a: this.rebuildPerson(latest.id, "a", messages),
@@ -210,7 +225,8 @@ export class EngineRuntime {
         return {
           day: {
             date: day.date,
-            prompt: { id: day.prompt_id, text: day.prompt_text },
+            prompts: this.promptsFor(day),
+            theme: day.prompt_text,
             resolved: true,
             persons,
           },
@@ -240,11 +256,23 @@ export class EngineRuntime {
     return {
       day: {
         date: day.date,
-        prompt: { id: day.prompt_id, text: day.prompt_text },
+        prompts: this.promptsFor(day),
+        theme: day.prompt_text,
         resolved: false,
         persons,
       },
     };
+  }
+
+  /** Each person's own question, falling back to the day row for any row
+   * written before per-person prompts existed. The migration backfills these,
+   * so the fallback is belt-and-braces rather than an expected path. */
+  private promptsFor(day: { id: number; prompt_id: string; prompt_text: string }): Record<PersonId, PromptRef> {
+    const one = (person: PersonId): PromptRef => {
+      const pd = this.opts.ledger.personDay(day.id, person);
+      return { id: pd.prompt_id ?? day.prompt_id, text: pd.prompt_text ?? day.prompt_text };
+    };
+    return { a: one("a"), b: one("b") };
   }
 
   private rebuildPerson(

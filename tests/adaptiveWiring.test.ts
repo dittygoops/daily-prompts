@@ -13,7 +13,7 @@ describe("adaptive/fallback wiring through EngineRuntime", () => {
     const ledger = Ledger.open(":memory:");
     const channel = new FakeChannel();
     const throwingAdaptive: PromptSource = {
-      nextPrompt: async () => { throw new Error("adaptive stub always fails"); },
+      nextPrompts: async () => { throw new Error("adaptive stub always fails"); },
     };
     const staticSource = new StaticBankPromptSource(bank, ledger);
     const promptSource = new FallbackPromptSource(throwingAdaptive, staticSource, { ledger, log: () => {} });
@@ -39,7 +39,9 @@ describe("adaptive/fallback wiring through EngineRuntime", () => {
     const ledger = Ledger.open(":memory:");
     const channel = new FakeChannel();
     const generated: Prompt = { id: "gen-2026-07-20", text: "What made you laugh today?" };
-    const workingAdaptive: PromptSource = { nextPrompt: async () => generated };
+    const workingAdaptive: PromptSource = {
+      nextPrompts: async () => ({ theme: "laughter", prompts: { a: generated, b: generated } }),
+    };
     const staticSource = new StaticBankPromptSource(bank, ledger);
     const promptSource = new FallbackPromptSource(workingAdaptive, staticSource, { ledger, log: () => {} });
 

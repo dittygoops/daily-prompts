@@ -1,5 +1,5 @@
 import type { Ledger } from "../ledger/ledger";
-import type { Prompt, PromptSource } from "./types";
+import type { DailyPrompts, PromptSource } from "./types";
 
 export interface FallbackPromptSourceDeps {
   ledger: Ledger;
@@ -23,9 +23,9 @@ export class FallbackPromptSource implements PromptSource {
     private readonly deps: FallbackPromptSourceDeps,
   ) {}
 
-  async nextPrompt(date: string): Promise<Prompt> {
+  async nextPrompts(date: string): Promise<DailyPrompts> {
     try {
-      return await this.primary.nextPrompt(date);
+      return await this.primary.nextPrompts(date);
     } catch (err) {
       const reason = String(err);
       this.deps.log(`ADAPTIVE PROMPT GENERATION FAILED for ${date}, falling back to static bank: ${reason}`);
@@ -44,7 +44,7 @@ export class FallbackPromptSource implements PromptSource {
         fallbackReason: reason,
         at: (this.deps.now ?? (() => new Date().toISOString()))(),
       });
-      return this.fallback.nextPrompt(date); // if this throws too, it propagates
+      return this.fallback.nextPrompts(date); // if this throws too, it propagates
     }
   }
 }

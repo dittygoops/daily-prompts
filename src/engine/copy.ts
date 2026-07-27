@@ -12,8 +12,11 @@ export function feedbackAsk(): string {
   return `Quick optional one: any thoughts on today's question, or ideas for future ones? Anything you send me until tomorrow's question is noted.`;
 }
 
-export function shareMessage(partnerName: string, responseText: string): string {
-  return `${partnerName} said:\n\n${responseText}`;
+/** Carries the partner's question as well as their answer: since the two
+ * people are now asked different questions, an answer alone would arrive
+ * with no idea what it was responding to. */
+export function shareMessage(partnerName: string, questionText: string, responseText: string): string {
+  return `${partnerName} was asked:\n${questionText}\n\nThey said:\n\n${responseText}`;
 }
 
 export function skipNotice(partnerName: string): string {

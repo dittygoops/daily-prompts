@@ -1,6 +1,6 @@
 import type { GenerationInput } from "../../../src/prompts/generationPrompt";
 import type { PersonContext } from "../../../src/memory/types";
-import type { PromptHistoryEntry } from "../../../src/prompts/history";
+import type { EnergySignal, PromptHistoryEntry } from "../../../src/prompts/history";
 
 /** Synthetic memory states for evaluating adaptive generation offline.
  * These are DATA, not tests: both unit tests and the eval scripts import
@@ -32,9 +32,15 @@ const answered = (chars: number) => ({ outcome: "answered" as const, responseLen
 const skipped = { outcome: "skipped" as const, responseLength: null };
 const noResponse = { outcome: "no_response" as const, responseLength: null };
 
+/** Historical days predate per-person prompts, so both people's side of a
+ * fixture day carries the same question. */
+const shared = (date: string, text: string, a: EnergySignal, b: EnergySignal, stance: string | null = null): PromptHistoryEntry =>
+  ({ date, stance, a: { ...a, text }, b: { ...b, text } });
+
 const base = (over: Partial<GenerationInput>): GenerationInput => ({
   today: "2026-07-20",
-  stance: "explore",
+  stanceA: "explore",
+  stanceB: "explore",
   names: { ...NAMES },
   contextA: emptyContext(),
   contextB: emptyContext(),
@@ -69,9 +75,9 @@ const oneSided: MemoryStateFixture = {
     }),
     coverageA: ["childhood", "food", "music", "pets"],
     history: [
-      { date: "2026-07-19", text: "What's a smell that instantly takes you back somewhere?", stance: null, a: answered(180), b: noResponse },
-      { date: "2026-07-18", text: "What's your ideal breakfast?", stance: null, a: answered(95), b: noResponse },
-    ] satisfies PromptHistoryEntry[],
+      shared("2026-07-19", "What's a smell that instantly takes you back somewhere?", answered(180), noResponse),
+      shared("2026-07-18", "What's your ideal breakfast?", answered(95), noResponse),
+    ],
   }),
 };
 
@@ -110,12 +116,12 @@ const richBoth: MemoryStateFixture = {
     coverageA: ["work", "family", "food", "fitness", "hobbies", "podcasts", "childhood", "travel"],
     coverageB: ["work", "driving", "travel", "food", "sports", "hobbies", "childhood"],
     history: [
-      { date: "2026-07-19", text: "What's the last thing that made you laugh out loud?", stance: null, a: answered(140), b: answered(76) },
-      { date: "2026-07-18", text: "What were you obsessed with at age 10?", stance: null, a: answered(220), b: answered(310) },
-      { date: "2026-07-17", text: "What's your go-to comfort show?", stance: null, a: answered(60), b: answered(88) },
-      { date: "2026-07-16", text: "Best meal you've had this month?", stance: null, a: answered(130), b: skipped },
-      { date: "2026-07-15", text: "Which app do you open first in the morning?", stance: null, a: answered(45), b: answered(30) },
-    ] satisfies PromptHistoryEntry[],
+      shared("2026-07-19", "What's the last thing that made you laugh out loud?", answered(140), answered(76)),
+      shared("2026-07-18", "What were you obsessed with at age 10?", answered(220), answered(310)),
+      shared("2026-07-17", "What's your go-to comfort show?", answered(60), answered(88)),
+      shared("2026-07-16", "Best meal you've had this month?", answered(130), skipped),
+      shared("2026-07-15", "Which app do you open first in the morning?", answered(45), answered(30)),
+    ],
   }),
 };
 
@@ -140,16 +146,16 @@ const heavyThread: MemoryStateFixture = {
     coverageA: ["work", "home", "plants"],
     coverageB: ["work", "games", "family"],
     history: [
-      { date: "2026-07-19", text: "What's a small thing that went right today?", stance: null, a: answered(110), b: answered(12) },
-      { date: "2026-07-18", text: "What's your favorite thing to cook?", stance: null, a: answered(150), b: skipped },
-    ] satisfies PromptHistoryEntry[],
+      shared("2026-07-19", "What's a small thing that went right today?", answered(110), answered(12)),
+      shared("2026-07-18", "What's your favorite thing to cook?", answered(150), skipped),
+    ],
   }),
 };
 
 const privateAsymmetry: MemoryStateFixture = {
   name: "private-asymmetry",
   description:
-    "Alex holds a thread Sam demonstrably does not know about. Since both people receive the identical prompt, referencing it would out Alex.",
+    "Alex holds a thread Sam demonstrably does not know about. Separate per-person questions must not leak it into Sam's question.",
   input: base({
     contextA: ctx({
       facts: ["[2026-07-12] Has been at the same agency for four years."],
@@ -167,8 +173,8 @@ const privateAsymmetry: MemoryStateFixture = {
     coverageA: ["work", "fitness"],
     coverageB: ["hobbies", "friends", "books"],
     history: [
-      { date: "2026-07-19", text: "What's a skill you'd download Matrix-style right now if you could?", stance: null, a: answered(70), b: answered(95) },
-    ] satisfies PromptHistoryEntry[],
+      shared("2026-07-19", "What's a skill you'd download Matrix-style right now if you could?", answered(70), answered(95)),
+    ],
   }),
 };
 
@@ -190,14 +196,13 @@ const feedbackConstrained: MemoryStateFixture = {
     feedbackB: ["yeah shorter please"],
     ideasA: [{ id: 41, text: "ask us about the worst haircut we ever had" }],
     history: [
-      {
-        date: "2026-07-19",
-        text: "If you had to describe your ideal Sunday from the moment you wake up to the moment you fall asleep, what would every part of it look like?",
-        stance: null,
-        a: answered(20),
-        b: skipped,
-      },
-    ] satisfies PromptHistoryEntry[],
+      shared(
+        "2026-07-19",
+        "If you had to describe your ideal Sunday from the moment you wake up to the moment you fall asleep, what would every part of it look like?",
+        answered(20),
+        skipped,
+      ),
+    ],
   }),
 };
 
@@ -220,8 +225,8 @@ const staleThreads: MemoryStateFixture = {
     coverageA: ["food", "music", "work"],
     coverageB: ["commute", "fitness", "nature"],
     history: [
-      { date: "2026-06-20", text: "What's a tiny thing that always makes your day a little better?", stance: null, a: answered(85), b: answered(64) },
-    ] satisfies PromptHistoryEntry[],
+      shared("2026-06-20", "What's a tiny thing that always makes your day a little better?", answered(85), answered(64)),
+    ],
   }),
 };
 
@@ -244,17 +249,17 @@ const lowEnergyHistory: MemoryStateFixture = {
     coverageA: ["school", "wellbeing", "hobbies"],
     coverageB: ["work", "food"],
     history: [
-      { date: "2026-07-19", text: "What's the best thing you ate this week?", stance: null, a: skipped, b: answered(4) },
-      { date: "2026-07-18", text: "What's your go-to comfort show?", stance: null, a: answered(6), b: skipped },
-      { date: "2026-07-17", text: "What's a small purchase that genuinely improved your life?", stance: null, a: noResponse, b: skipped },
-    ] satisfies PromptHistoryEntry[],
+      shared("2026-07-19", "What's the best thing you ate this week?", skipped, answered(4)),
+      shared("2026-07-18", "What's your go-to comfort show?", answered(6), skipped),
+      shared("2026-07-17", "What's a small purchase that genuinely improved your life?", noResponse, skipped),
+    ],
   }),
 };
 
 const conflictingPreferences: MemoryStateFixture = {
   name: "conflicting-preferences",
   description:
-    "Alex asks for deeper questions while Sam asks for lighter ones. One identical prompt has to satisfy both, so neither preference can be followed absolutely.",
+    "Alex asks for deeper questions while Sam asks for lighter ones. Each person's own question has to respect their own preference.",
   input: base({
     contextA: ctx({
       interests: ["[2026-07-16] Reads philosophy for fun."],
@@ -269,8 +274,8 @@ const conflictingPreferences: MemoryStateFixture = {
     feedbackA: ["can we get something with a bit more substance"],
     feedbackB: ["these are fine but keep them fun, i don't want homework"],
     history: [
-      { date: "2026-07-19", text: "Who was your first celebrity crush?", stance: null, a: answered(25), b: answered(210) },
-    ] satisfies PromptHistoryEntry[],
+      shared("2026-07-19", "Who was your first celebrity crush?", answered(25), answered(210)),
+    ],
   }),
 };
 

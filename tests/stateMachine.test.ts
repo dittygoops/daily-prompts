@@ -10,13 +10,17 @@ const machine = new DayMachine({
 });
 
 const prompt = { id: "p1", text: "What's your ideal breakfast?" };
+// Both people share one question here; per-person differences are covered
+// in the dedicated test below, so existing expectations stay meaningful.
+const prompts = { a: prompt, b: prompt };
 
 function dispatch(state: MachineState = { day: null }) {
   return machine.step(state, {
     type: "DispatchDue",
     date: "2026-07-17",
     at: "t0",
-    prompt,
+    prompts,
+    theme: null,
   });
 }
 
@@ -59,7 +63,8 @@ describe("dispatch", () => {
       type: "DispatchDue",
       date: "2026-07-17",
       at: "t1",
-      prompt,
+      prompts,
+      theme: null,
     });
     expect(second.effects).toEqual([]);
   });
@@ -70,7 +75,8 @@ describe("dispatch", () => {
       type: "DispatchDue",
       date: "2026-07-18",
       at: "t9",
-      prompt: { id: "p2", text: "Best meal this month?" },
+      prompts: { a: { id: "p2", text: "Best meal this month?" }, b: { id: "p2", text: "Best meal this month?" } },
+      theme: null,
     });
     const resolve = next.effects.find((e) => e.type === "ResolveDay");
     expect(resolve).toEqual({ type: "ResolveDay", state: "expired", at: "t9" });
@@ -85,7 +91,8 @@ describe("dispatch", () => {
       type: "DispatchDue",
       date: "2026-07-18",
       at: "t9",
-      prompt: { id: "p2", text: "x" },
+      prompts: { a: { id: "p2", text: "x" }, b: { id: "p2", text: "x" } },
+      theme: null,
     });
     const resolve = next.effects.find((e) => e.type === "ResolveDay");
     expect(resolve).toMatchObject({ state: "resolved_partial" });
@@ -282,5 +289,49 @@ describe("no open day", () => {
       text: "hi",
       at: "t",
     });
+  });
+});
+
+describe("per-person prompts", () => {
+  test("each person is sent their own question, not a shared one", () => {
+    const result = machine.step({ day: null }, {
+      type: "DispatchDue",
+      date: "2026-07-17",
+      at: "t0",
+      prompts: {
+        a: { id: "gen-a", text: "How is the guitar going?" },
+        b: { id: "gen-b", text: "How did the party go?" },
+      },
+      theme: "things you have been practising",
+    });
+    const sends = result.effects.filter((e) => e.type === "Send" && e.kind === "prompt");
+    expect(sends).toHaveLength(2);
+    expect(sends.find((s) => s.person === "a")!.text).toContain("How is the guitar going?");
+    expect(sends.find((s) => s.person === "b")!.text).toContain("How did the party go?");
+    // The live failure: one person receiving a question about the other's life.
+    expect(sends.find((s) => s.person === "a")!.text).not.toContain("How did the party go?");
+  });
+
+  test("a shared answer carries the partner's question, since the two differ", () => {
+    let state = machine.step({ day: null }, {
+      type: "DispatchDue",
+      date: "2026-07-17",
+      at: "t0",
+      prompts: {
+        a: { id: "gen-a", text: "How is the guitar going?" },
+        b: { id: "gen-b", text: "How did the party go?" },
+      },
+      theme: null,
+    }).state;
+    state = machine.step(state, { type: "InboundText", person: "a", text: "slowly", at: "t1" }).state;
+    state = machine.step(state, { type: "SettleElapsed", person: "a", at: "t2", gen: 1 }).state;
+    state = machine.step(state, { type: "InboundText", person: "b", text: "it was great", at: "t3" }).state;
+    const result = machine.step(state, { type: "SettleElapsed", person: "b", at: "t4", gen: 1 });
+
+    const shares = result.effects.filter((e) => e.type === "Send" && e.kind === "share");
+    const toA = shares.find((s) => s.person === "a")!;
+    // Without the question, an answer to an unseen prompt is meaningless.
+    expect(toA.text).toContain("How did the party go?");
+    expect(toA.text).toContain("it was great");
   });
 });

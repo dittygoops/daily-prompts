@@ -25,3 +25,11 @@ export function decideStance(input: StanceInput): Stance {
   const window = input.recentStances.slice(0, WINDOW_DAYS);
   return window.some((s) => s === "exploit") ? "explore" : "exploit";
 }
+
+/** The day's stance is an intent, not a promise each person can keep: a
+ * person with no open threads has nothing to follow up on, so forcing the
+ * day's exploit on them would produce a follow-up about nothing. They
+ * explore instead, and the other person's exploit still happens. */
+export function stanceForPerson(dayStance: Stance, hasThreads: boolean): Stance {
+  return hasThreads ? dayStance : "explore";
+}

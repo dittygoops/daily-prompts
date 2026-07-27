@@ -8,12 +8,12 @@ export interface PromptRef {
 }
 
 export type Event =
-  | { type: "DispatchDue"; date: string; at: string; prompt: PromptRef }
+  | { type: "DispatchDue"; date: string; at: string; prompts: Record<PersonId, PromptRef>; theme: string | null }
   | { type: "InboundText"; person: PersonId; text: string; at: string }
   | { type: "SettleElapsed"; person: PersonId; at: string; generation?: number };
 
 export type Effect =
-  | { type: "CreateDay"; date: string; prompt: PromptRef; at: string }
+  | { type: "CreateDay"; date: string; prompts: Record<PersonId, PromptRef>; theme: string | null; at: string }
   | { type: "ResolveDay"; state: Exclude<DayState, "dispatched">; at: string }
   | { type: "Send"; person: PersonId; kind: MessageKind; text: string }
   | { type: "RecordInbound"; person: PersonId; kind: MessageKind; text: string; at: string }
@@ -30,7 +30,10 @@ export interface PersonCtx {
 
 export interface DayCtx {
   date: string;
-  prompt: PromptRef;
+  /** One question per person: a question built from one person's memory is
+   * unanswerable by the other, which reached production once. */
+  prompts: Record<PersonId, PromptRef>;
+  theme: string | null;
   resolved: boolean;
   persons: Record<PersonId, PersonCtx>;
 }
@@ -84,16 +87,22 @@ export class DayMachine {
       });
     }
 
-    effects.push({ type: "CreateDay", date: event.date, prompt: event.prompt, at: event.at });
-    const text = copy.promptMessage(event.prompt.text);
-    effects.push({ type: "Send", person: "a", kind: "prompt", text });
-    effects.push({ type: "Send", person: "b", kind: "prompt", text });
+    effects.push({ type: "CreateDay", date: event.date, prompts: event.prompts, theme: event.theme, at: event.at });
+    for (const person of ["a", "b"] as const) {
+      effects.push({
+        type: "Send",
+        person,
+        kind: "prompt",
+        text: copy.promptMessage(event.prompts[person].text),
+      });
+    }
 
     return {
       state: {
         day: {
           date: event.date,
-          prompt: event.prompt,
+          prompts: event.prompts,
+          theme: event.theme,
           resolved: false,
           persons: { a: freshPerson(), b: freshPerson() },
         },
@@ -213,13 +222,13 @@ export class DayMachine {
           type: "Send",
           person: partner,
           kind: "share",
-          text: copy.shareMessage(myName, me.response!),
+          text: copy.shareMessage(myName, day.prompts[person].text, me.response!),
         });
         effects.push({
           type: "Send",
           person,
           kind: "share",
-          text: copy.shareMessage(theirName, them.response!),
+          text: copy.shareMessage(theirName, day.prompts[partner].text, them.response!),
         });
         effects.push({ type: "Send", person, kind: "feedback_ask", text: copy.feedbackAsk() });
         effects.push({ type: "ResolveDay", state: "resolved_shared", at });

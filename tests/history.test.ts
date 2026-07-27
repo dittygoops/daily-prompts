@@ -15,14 +15,12 @@ describe("recentPromptHistory", () => {
     const history = recentPromptHistory(ledger, "2026-07-18", 10);
     expect(history.map((h) => h.date)).toEqual(["2026-07-17", "2026-07-16"]);
     expect(history[0]).toMatchObject({
-      text: "second prompt",
-      a: { outcome: "answered", responseLength: "another answer here".length },
-      b: { outcome: "answered", responseLength: "b answered too".length },
+      a: { text: "second prompt", outcome: "answered", responseLength: "another answer here".length },
+      b: { text: "second prompt", outcome: "answered", responseLength: "b answered too".length },
     });
     expect(history[1]).toMatchObject({
-      text: "first prompt",
-      a: { outcome: "answered", responseLength: "a short answer".length },
-      b: { outcome: "skipped", responseLength: null },
+      a: { text: "first prompt", outcome: "answered", responseLength: "a short answer".length },
+      b: { text: "first prompt", outcome: "skipped", responseLength: null },
     });
   });
 
@@ -32,7 +30,7 @@ describe("recentPromptHistory", () => {
     ledger.finalizeResponse(day.id, "a", "answered", "t1");
     // b never answered; day resolved partial by the caller elsewhere
     const history = recentPromptHistory(ledger, "2026-07-17", 10);
-    expect(history[0]!.b).toEqual({ outcome: "no_response", responseLength: null });
+    expect(history[0]!.b).toEqual({ text: "x", outcome: "no_response", responseLength: null });
   });
 
   test("respects the window limit", () => {
@@ -47,5 +45,18 @@ describe("recentPromptHistory", () => {
   test("empty ledger returns an empty array, not an error", () => {
     const ledger = Ledger.open(":memory:");
     expect(recentPromptHistory(ledger, "2026-07-17", 10)).toEqual([]);
+  });
+
+  test("each person's history entry carries their own question text when they were asked different things", () => {
+    const ledger = Ledger.open(":memory:");
+    const day = ledger.createDay("2026-07-16", "p1", "the day's theme", "t");
+    ledger.setPersonPrompt(day.id, "a", "id-a", "A's own question");
+    ledger.setPersonPrompt(day.id, "b", "id-b", "B's own question");
+    ledger.finalizeResponse(day.id, "a", "a's answer", "t1");
+    ledger.finalizeResponse(day.id, "b", "b's answer", "t2");
+
+    const history = recentPromptHistory(ledger, "2026-07-17", 10);
+    expect(history[0]!.a.text).toBe("A's own question");
+    expect(history[0]!.b.text).toBe("B's own question");
   });
 });
