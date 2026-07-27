@@ -16,11 +16,14 @@ Rules:
 - Respect standing taste feedback (e.g. "too long", "loved this kind") as a constraint on future prompts.
 - If an unconsumed prompt idea below is a good fit for today, prefer using it (adapted to the question format if needed) and cite its id in "usedIdeaId"; otherwise leave "usedIdeaId" null. Never force in a bad-fit idea just because one exists.
 - If both people's context is empty or sparse (day one, or early on), lean toward broad, easy exploration — this is fine and expected, do not treat it as a problem.
+- Every context line is prefixed with the date it was recorded, and today's date is given below. Read threads and moods against that gap: a thread from a few days ago is probably still live, one from weeks ago may well be resolved, and a plan for a date that has now passed has already happened. Ask about a stale item in the past tense ("how did X go?") rather than as though it is still ahead of them, and never treat an old mood as how someone feels today.
 
 Respond with strict JSON only, no prose, in exactly this shape:
 {"prompt":"...","rationale":"one sentence: what you drew on and why exploit vs explore","usedIdeaId":null}`;
 
 export interface GenerationInput {
+  /** The date the prompt is for, so dated context lines can be aged. */
+  today: string;
   names: Record<PersonId, string>;
   contextA: PersonContext;
   contextB: PersonContext;
@@ -52,6 +55,8 @@ function contextSection(name: string, ctx: PersonContext, coverage: string[], fe
 
 export function buildGenerationUserPrompt(input: GenerationInput): string {
   const lines: string[] = [];
+  lines.push(`Today is ${input.today}. Every dated line below was recorded on the date shown.`);
+  lines.push("");
   lines.push(contextSection(input.names.a, input.contextA, input.coverageA, input.feedbackA, input.ideasA));
   lines.push("");
   lines.push(contextSection(input.names.b, input.contextB, input.coverageB, input.feedbackB, input.ideasB));

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { extractObservations, type ExtractionInput } from "../src/extraction/extractor";
+import { EXTRACTION_SYSTEM_PROMPT } from "../src/extraction/prompt";
 import type { LlmClient } from "../src/llm/types";
 
 function fakeLlm(response: string | (() => string)) {
@@ -22,6 +23,22 @@ const baseInput: ExtractionInput = {
   skipped: false,
   feedback: [],
 };
+
+describe("temporal grounding", () => {
+  test("tells the extractor what date the answer was given", async () => {
+    const { client, calls } = fakeLlm('{"observations":[]}');
+    await extractObservations({ ...baseInput, date: "2026-07-19" }, client);
+    expect(calls[0]!.user).toContain("2026-07-19");
+  });
+
+  test("system prompt requires resolving relative time references to absolute dates", () => {
+    const sys = EXTRACTION_SYSTEM_PROMPT.toLowerCase();
+    // Without this, "going to Sedona this weekend" is stored verbatim and
+    // still reads as upcoming months later.
+    expect(sys).toMatch(/this weekend|tomorrow|relative/);
+    expect(sys).toMatch(/absolute|actual date|resolve/);
+  });
+});
 
 describe("extractObservations", () => {
   test("a skipped day with no feedback never calls the LLM", async () => {

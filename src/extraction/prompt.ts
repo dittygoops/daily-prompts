@@ -8,6 +8,8 @@ Rules:
 - Every observation must be traceable to the given text; do not infer beyond what a careful reader would agree to.
 - Prefer fewer, higher-confidence observations over many speculative ones. Zero observations is a valid and often correct answer.
 - Keep each observation's "text" short (one sentence), atomic (one fact per observation), and third-person.
+- Resolve every relative time reference to an absolute date, using the answer's date given below. "this weekend", "tomorrow", "next Friday", "today", "this week" and similar must never survive into an observation's text, because the observation is stored permanently and re-read months later, when "this weekend" would still read as upcoming. Write "on 2026-03-14" or "the week of 2026-03-10" instead. If the reference is too vague to resolve to a date (e.g. "soon", "one of these days"), keep it vague rather than guessing a date.
+- Anything scheduled or expected at a specific time is a thread, and its text must carry that date so a later reader can tell whether it has already happened.
 - "topic" is a short kebab-case tag (e.g. "family-traditions", "thesis-stress", "comfort-food") used later to see what's been asked about.
 
 Observation types:
@@ -35,13 +37,25 @@ If the person skipped the day and gave no feedback, there is nothing to extract;
 Respond with strict JSON only, no prose, in exactly this shape:
 {"observations":[{"type":"fact","text":"...","topic":"..."}],"promptIdeas":["..."]}`;
 
+/** The weekday is what makes "next Friday" or "this weekend" resolvable at
+ * all. Built from explicit local parts so a bare "YYYY-MM-DD" is not parsed
+ * as UTC midnight and shifted a day backward in western timezones. */
+function dayOfWeekName(isoDate: string): string {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  return new Date(year!, month! - 1, day!).toLocaleDateString("en-US", { weekday: "long" });
+}
+
 export function buildUserPrompt(input: {
+  date: string;
   promptText: string;
   response: string | null;
   skipped: boolean;
   feedback: string[];
 }): string {
-  const lines = [`Today's question: ${input.promptText}`];
+  const lines = [
+    `Date this answer was given: ${input.date} (${dayOfWeekName(input.date)}). Resolve every relative time reference against this date.`,
+    `Today's question: ${input.promptText}`,
+  ];
   if (input.skipped) {
     lines.push("They skipped answering today.");
   } else {

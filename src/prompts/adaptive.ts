@@ -54,6 +54,7 @@ export class AdaptivePromptSource implements PromptSource {
     const ideasB = this.ledger.unconsumedPromptIdeas("b").map((i) => ({ id: i.id, text: i.text }));
 
     const userPrompt = buildGenerationUserPrompt({
+      today: date,
       names: this.opts.names,
       contextA,
       contextB,

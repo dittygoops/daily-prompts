@@ -13,6 +13,7 @@ const richContext: PersonContext = {
 };
 
 const baseInput = {
+  today: "2026-07-20",
   names: { a: "Alex", b: "Sam" } as const,
   contextA: emptyContext,
   contextB: emptyContext,
@@ -57,6 +58,18 @@ describe("ADAPTIVE_SYSTEM_PROMPT", () => {
   test("instructs that both people always get the identical prompt", () => {
     const sys = ADAPTIVE_SYSTEM_PROMPT.toLowerCase();
     expect(sys).toMatch(/identical|same prompt|both/);
+  });
+});
+
+describe("temporal grounding", () => {
+  test("tells the generator today's date so it can age the dated context lines", () => {
+    const user = buildGenerationUserPrompt({ ...baseInput, today: "2026-07-26" });
+    expect(user).toContain("2026-07-26");
+  });
+
+  test("system prompt instructs treating old threads and moods as possibly resolved", () => {
+    const sys = ADAPTIVE_SYSTEM_PROMPT.toLowerCase();
+    expect(sys).toMatch(/stale|old|no longer|already (happened|passed)/);
   });
 });
 
