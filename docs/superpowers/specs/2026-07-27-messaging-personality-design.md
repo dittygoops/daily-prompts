@@ -22,6 +22,21 @@ Everything below was verified live against the shared free-tier Photon line, sen
 | Received HEIC as a background | **fails**, "Unknown server error" |
 | Same photo converted to JPEG as background | works |
 
+### Inbound photo shapes (verified live, 2026-07-27)
+
+A photo arrives in one of two shapes, and both must be handled:
+
+- **No caption**: `content.type: "attachment"` directly, with `id`, `name`, `mimeType`, `size`, and `read()`.
+- **With a caption**: `content.type: "group"` on a SINGLE message, carrying an `items` array where each item has its own `content`. Observed exactly:
+
+```
+group with 2 part(s):
+  [0] type=attachment  name=IMG_0991.HEIC  mime=image/heic  size=2053225
+  [1] type=text        text="Test caption beta"
+```
+
+This matters because the caption travels WITH the photo rather than as a separate message, so the share step never has to correlate two arrivals. It also means a decoder that handles only `text` and `attachment` silently drops every captioned photo: the sender sees no acknowledgement and nothing is logged. That was the actual behaviour before this was found, and it is the reason the shape was worth testing before Phase 2 rather than after.
+
 Three findings that shaped the design:
 
 1. **iPhone photos are HEIC and HEIC is rejected as a background.** PNG and JPEG both work. Conversion is mandatory. `sips` is built into macOS, which we already require in order to run iMessage at all, so this needs no dependency: 2.5MB HEIC became a 552KB JPEG at 1600px.
