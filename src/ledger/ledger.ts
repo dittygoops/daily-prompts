@@ -67,6 +67,9 @@ export interface GenerationLogEntry {
   userPrompt: string | null;
   rawResponse: string | null;
   rationale: string | null;
+  /** "explore" or "exploit", as declared by the generator. Null on fallback
+   * rows, where no generator ran to declare anything. */
+  stance: string | null;
   fellBack: boolean;
   fallbackReason: string | null;
   at: string;
@@ -79,8 +82,8 @@ export interface GenerationLogRow extends GenerationLogEntry {
 interface GenerationLogDbRow {
   id: number; date: string; prompt_id: string | null; prompt_text: string | null;
   model: string | null; system_prompt: string | null; user_prompt: string | null;
-  raw_response: string | null; rationale: string | null; fell_back: number;
-  fallback_reason: string | null; at: string;
+  raw_response: string | null; rationale: string | null; stance: string | null;
+  fell_back: number; fallback_reason: string | null; at: string;
 }
 
 const toGenerationLogRow = (r: GenerationLogDbRow): GenerationLogRow => ({
@@ -93,6 +96,7 @@ const toGenerationLogRow = (r: GenerationLogDbRow): GenerationLogRow => ({
   userPrompt: r.user_prompt,
   rawResponse: r.raw_response,
   rationale: r.rationale,
+  stance: r.stance,
   fellBack: r.fell_back === 1,
   fallbackReason: r.fallback_reason,
   at: r.at,
@@ -139,12 +143,24 @@ const EXTRACTION_MAX_ATTEMPTS = 3;
 export class Ledger {
   private constructor(private readonly db: Database) {}
 
+  /** Additive column migrations. schema.sql's CREATE TABLE IF NOT EXISTS is
+   * a no-op against a ledger that already exists, so a column added there
+   * would never reach the live database. Each step is guarded by its own
+   * existence check so opening is idempotent. */
+  private static migrateSchema(db: Database): void {
+    const columns = db.query("PRAGMA table_info(generation_log)").all() as { name: string }[];
+    if (!columns.some((c) => c.name === "stance")) {
+      db.exec("ALTER TABLE generation_log ADD COLUMN stance TEXT");
+    }
+  }
+
   static open(path: string): Ledger {
     const db = new Database(path, { create: true, strict: true });
     db.exec("PRAGMA journal_mode = WAL;");
     db.exec("PRAGMA foreign_keys = ON;");
     const schemaPath = join(import.meta.dir, "schema.sql");
     db.exec(readFileSync(schemaPath, "utf8"));
+    Ledger.migrateSchema(db);
     if (path !== ":memory:") {
       // The ledger holds the couple's entire message history verbatim; keep
       // it out of reach of other local accounts.
@@ -428,8 +444,8 @@ export class Ledger {
     this.db
       .query(
         `INSERT INTO generation_log
-           (date, prompt_id, prompt_text, model, system_prompt, user_prompt, raw_response, rationale, fell_back, fallback_reason, at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (date, prompt_id, prompt_text, model, system_prompt, user_prompt, raw_response, rationale, stance, fell_back, fallback_reason, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         entry.date,
@@ -440,6 +456,7 @@ export class Ledger {
         entry.userPrompt,
         entry.rawResponse,
         entry.rationale,
+        entry.stance,
         entry.fellBack ? 1 : 0,
         entry.fallbackReason,
         entry.at,

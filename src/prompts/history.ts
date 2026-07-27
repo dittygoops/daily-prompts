@@ -11,6 +11,10 @@ export interface EnergySignal {
 export interface PromptHistoryEntry {
   date: string;
   text: string;
+  /** The stance the generator declared that day, so it can see its own
+   * drift toward one side. Null for days predating the stance field or
+   * served by the static-bank fallback. */
+  stance: string | null;
   a: EnergySignal;
   b: EnergySignal;
 }
@@ -37,6 +41,7 @@ export function recentPromptHistory(
   return ledger.recentDays(date, windowDays).map((day) => ({
     date: day.date,
     text: day.prompt_text,
+    stance: ledger.generationLogFor(day.date)[0]?.stance ?? null,
     a: energyFor(ledger, day.id, "a"),
     b: energyFor(ledger, day.id, "b"),
   }));

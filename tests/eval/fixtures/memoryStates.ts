@@ -34,6 +34,7 @@ const noResponse = { outcome: "no_response" as const, responseLength: null };
 
 const base = (over: Partial<GenerationInput>): GenerationInput => ({
   today: "2026-07-20",
+  stance: "explore",
   names: { ...NAMES },
   contextA: emptyContext(),
   contextB: emptyContext(),
@@ -68,8 +69,8 @@ const oneSided: MemoryStateFixture = {
     }),
     coverageA: ["childhood", "food", "music", "pets"],
     history: [
-      { date: "2026-07-19", text: "What's a smell that instantly takes you back somewhere?", a: answered(180), b: noResponse },
-      { date: "2026-07-18", text: "What's your ideal breakfast?", a: answered(95), b: noResponse },
+      { date: "2026-07-19", text: "What's a smell that instantly takes you back somewhere?", stance: null, a: answered(180), b: noResponse },
+      { date: "2026-07-18", text: "What's your ideal breakfast?", stance: null, a: answered(95), b: noResponse },
     ] satisfies PromptHistoryEntry[],
   }),
 };
@@ -109,11 +110,11 @@ const richBoth: MemoryStateFixture = {
     coverageA: ["work", "family", "food", "fitness", "hobbies", "podcasts", "childhood", "travel"],
     coverageB: ["work", "driving", "travel", "food", "sports", "hobbies", "childhood"],
     history: [
-      { date: "2026-07-19", text: "What's the last thing that made you laugh out loud?", a: answered(140), b: answered(76) },
-      { date: "2026-07-18", text: "What were you obsessed with at age 10?", a: answered(220), b: answered(310) },
-      { date: "2026-07-17", text: "What's your go-to comfort show?", a: answered(60), b: answered(88) },
-      { date: "2026-07-16", text: "Best meal you've had this month?", a: answered(130), b: skipped },
-      { date: "2026-07-15", text: "Which app do you open first in the morning?", a: answered(45), b: answered(30) },
+      { date: "2026-07-19", text: "What's the last thing that made you laugh out loud?", stance: null, a: answered(140), b: answered(76) },
+      { date: "2026-07-18", text: "What were you obsessed with at age 10?", stance: null, a: answered(220), b: answered(310) },
+      { date: "2026-07-17", text: "What's your go-to comfort show?", stance: null, a: answered(60), b: answered(88) },
+      { date: "2026-07-16", text: "Best meal you've had this month?", stance: null, a: answered(130), b: skipped },
+      { date: "2026-07-15", text: "Which app do you open first in the morning?", stance: null, a: answered(45), b: answered(30) },
     ] satisfies PromptHistoryEntry[],
   }),
 };
@@ -139,8 +140,8 @@ const heavyThread: MemoryStateFixture = {
     coverageA: ["work", "home", "plants"],
     coverageB: ["work", "games", "family"],
     history: [
-      { date: "2026-07-19", text: "What's a small thing that went right today?", a: answered(110), b: answered(12) },
-      { date: "2026-07-18", text: "What's your favorite thing to cook?", a: answered(150), b: skipped },
+      { date: "2026-07-19", text: "What's a small thing that went right today?", stance: null, a: answered(110), b: answered(12) },
+      { date: "2026-07-18", text: "What's your favorite thing to cook?", stance: null, a: answered(150), b: skipped },
     ] satisfies PromptHistoryEntry[],
   }),
 };
@@ -166,7 +167,7 @@ const privateAsymmetry: MemoryStateFixture = {
     coverageA: ["work", "fitness"],
     coverageB: ["hobbies", "friends", "books"],
     history: [
-      { date: "2026-07-19", text: "What's a skill you'd download Matrix-style right now if you could?", a: answered(70), b: answered(95) },
+      { date: "2026-07-19", text: "What's a skill you'd download Matrix-style right now if you could?", stance: null, a: answered(70), b: answered(95) },
     ] satisfies PromptHistoryEntry[],
   }),
 };
@@ -192,6 +193,7 @@ const feedbackConstrained: MemoryStateFixture = {
       {
         date: "2026-07-19",
         text: "If you had to describe your ideal Sunday from the moment you wake up to the moment you fall asleep, what would every part of it look like?",
+        stance: null,
         a: answered(20),
         b: skipped,
       },
@@ -218,7 +220,7 @@ const staleThreads: MemoryStateFixture = {
     coverageA: ["food", "music", "work"],
     coverageB: ["commute", "fitness", "nature"],
     history: [
-      { date: "2026-06-20", text: "What's a tiny thing that always makes your day a little better?", a: answered(85), b: answered(64) },
+      { date: "2026-06-20", text: "What's a tiny thing that always makes your day a little better?", stance: null, a: answered(85), b: answered(64) },
     ] satisfies PromptHistoryEntry[],
   }),
 };
@@ -242,9 +244,9 @@ const lowEnergyHistory: MemoryStateFixture = {
     coverageA: ["school", "wellbeing", "hobbies"],
     coverageB: ["work", "food"],
     history: [
-      { date: "2026-07-19", text: "What's the best thing you ate this week?", a: skipped, b: answered(4) },
-      { date: "2026-07-18", text: "What's your go-to comfort show?", a: answered(6), b: skipped },
-      { date: "2026-07-17", text: "What's a small purchase that genuinely improved your life?", a: noResponse, b: skipped },
+      { date: "2026-07-19", text: "What's the best thing you ate this week?", stance: null, a: skipped, b: answered(4) },
+      { date: "2026-07-18", text: "What's your go-to comfort show?", stance: null, a: answered(6), b: skipped },
+      { date: "2026-07-17", text: "What's a small purchase that genuinely improved your life?", stance: null, a: noResponse, b: skipped },
     ] satisfies PromptHistoryEntry[],
   }),
 };
@@ -267,7 +269,7 @@ const conflictingPreferences: MemoryStateFixture = {
     feedbackA: ["can we get something with a bit more substance"],
     feedbackB: ["these are fine but keep them fun, i don't want homework"],
     history: [
-      { date: "2026-07-19", text: "Who was your first celebrity crush?", a: answered(25), b: answered(210) },
+      { date: "2026-07-19", text: "Who was your first celebrity crush?", stance: null, a: answered(25), b: answered(210) },
     ] satisfies PromptHistoryEntry[],
   }),
 };

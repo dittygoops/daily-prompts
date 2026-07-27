@@ -29,6 +29,7 @@ interface Scored {
   date: string;
   text: string;
   rationale: string | null;
+  stance: string | null;
   model: string | null;
   judgment: Judgment;
   novelty: NearestPriorMatch | null;
@@ -44,6 +45,7 @@ for (const row of generated) {
     date: row.date,
     text: row.promptText!,
     rationale: row.rationale,
+    stance: row.stance,
     model: row.model,
     judgment: await judgePrompt(row.promptText!, llm),
     novelty: nearestPrior(row.promptText!, priors),
@@ -65,10 +67,13 @@ const axisFailures = Object.fromEntries(
   AXES.map(([axis]) => [axis, scored.filter((s) => !s.judgment[axis]).length]),
 ) as Record<(typeof AXES)[number][0], number>;
 
-/** Crude but deterministic read of the generator's own stated reasoning.
- * The rationale field is free text, so this classifies rather than counts
- * exactly; the full rationales are printed below for the real judgement. */
-function stance(rationale: string | null): "exploit" | "explore" | "unclear" {
+/** The stance is now recorded explicitly (assigned in code, see
+ * src/prompts/stance.ts). Rows predating that column fall back to
+ * classifying the free-text rationale, which is why "unclear" still
+ * exists and why the earliest days report less precisely. */
+function stance(row: { stance: string | null; rationale: string | null }): "exploit" | "explore" | "unclear" {
+  if (row.stance === "exploit" || row.stance === "explore") return row.stance;
+  const rationale = row.rationale;
   if (!rationale) return "unclear";
   const r = rationale.toLowerCase();
   const exploit = /exploit|follow(ing)? up|building on|known thread|open thread|their interest/.test(r);
@@ -80,7 +85,7 @@ function stance(rationale: string | null): "exploit" | "explore" | "unclear" {
 }
 
 const stances = { exploit: 0, explore: 0, unclear: 0 };
-for (const s of scored) stances[stance(s.rationale)]++;
+for (const s of scored) stances[stance(s)]++;
 
 const pct = (n: number, d: number) => (d === 0 ? "n/a" : `${Math.round((n / d) * 100)}%`);
 const mark = (b: boolean) => (b ? "✅" : "❌");
@@ -110,7 +115,7 @@ if (fellBack.length > 0) {
 lines.push("");
 lines.push(`### Explore / exploit mix`);
 lines.push("");
-lines.push(`Classified from the generator's own recorded rationale:`);
+lines.push(`Read from the recorded stance column, falling back to classifying the rationale for rows predating it:`);
 lines.push("");
 lines.push(`| stance | count | share |`);
 lines.push(`|---|---|---|`);
@@ -189,7 +194,7 @@ lines.push("");
 lines.push(`## Recorded rationales`);
 lines.push("");
 for (const s of scored) {
-  lines.push(`- \`${s.date}\` (${stance(s.rationale)}): ${s.rationale ?? "(none recorded)"}`);
+  lines.push(`- \`${s.date}\` (${stance(s)}): ${s.rationale ?? "(none recorded)"}`);
 }
 lines.push("");
 

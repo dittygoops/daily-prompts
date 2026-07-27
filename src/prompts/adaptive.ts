@@ -7,6 +7,8 @@ import { addDays } from "../scheduler";
 import { recentFeedbackByPerson } from "./feedback";
 import { ADAPTIVE_SYSTEM_PROMPT, buildGenerationUserPrompt } from "./generationPrompt";
 import { recentPromptHistory } from "./history";
+import { decideStance } from "./stance";
+import { NEAR_DUPLICATE_THRESHOLD, nearestPrior } from "../eval/novelty";
 import type { Prompt, PromptSource } from "./types";
 
 export interface AdaptivePromptSourceOptions {
@@ -19,6 +21,9 @@ export interface AdaptivePromptSourceOptions {
 
 const responseSchema = z.object({
   prompt: z.string().min(1).max(300),
+  // Required, not optional: forcing the generator to commit to a stance is
+  // the mechanism that makes the explore/exploit ratio measurable at all.
+  stance: z.enum(["explore", "exploit"]),
   rationale: z.string().min(1),
   usedIdeaId: z.number().nullable().optional(),
 });
@@ -53,8 +58,14 @@ export class AdaptivePromptSource implements PromptSource {
     const ideasA = this.ledger.unconsumedPromptIdeas("a").map((i) => ({ id: i.id, text: i.text }));
     const ideasB = this.ledger.unconsumedPromptIdeas("b").map((i) => ({ id: i.id, text: i.text }));
 
+    const stance = decideStance({
+      recentStances: history.map((h) => h.stance),
+      hasThreads: contextA.threads.length > 0 || contextB.threads.length > 0,
+    });
+
     const userPrompt = buildGenerationUserPrompt({
       today: date,
+      stance,
       names: this.opts.names,
       contextA,
       contextB,
@@ -84,6 +95,20 @@ export class AdaptivePromptSource implements PromptSource {
         continue;
       }
 
+      // Deterministic repeat guard. The system prompt already forbids
+      // repeats and the history is right there in the context, and the
+      // generator still reproduced a prompt from six days earlier almost
+      // verbatim. Retrying costs one call; shipping a duplicate is visible
+      // to both people.
+      const priorTexts = history.map((h) => h.text);
+      const nearest = nearestPrior(shaped.data.prompt, priorTexts);
+      if (nearest && nearest.similarity >= NEAR_DUPLICATE_THRESHOLD && attempt < MAX_ATTEMPTS) {
+        lastError = new Error(
+          `AdaptivePromptSource: generated prompt near-duplicates "${nearest.text}" (${nearest.similarity.toFixed(2)})`,
+        );
+        continue;
+      }
+
       const at = new Date().toISOString();
       this.ledger.recordGeneration({
         date,
@@ -94,6 +119,8 @@ export class AdaptivePromptSource implements PromptSource {
         userPrompt,
         rawResponse: raw,
         rationale: shaped.data.rationale,
+        stance, // the assigned stance, which is the ground truth of what was asked for
+
         fellBack: false,
         fallbackReason: null,
         at,

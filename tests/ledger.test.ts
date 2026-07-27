@@ -1,10 +1,39 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Ledger } from "../src/ledger/ledger";
 
 let ledger: Ledger;
 
 beforeEach(() => {
   ledger = Ledger.open(":memory:");
+});
+
+describe("schema migration", () => {
+  // CREATE TABLE IF NOT EXISTS silently skips an existing table, so a column
+  // added to schema.sql never reaches a ledger that already exists. The live
+  // production ledger is exactly that case.
+  test("adds the stance column to a generation_log created before it existed", () => {
+    const path = join(tmpdir(), `daily-prompts-migration-${Date.now()}.db`);
+    try {
+      const old = new Database(path, { create: true, strict: true });
+      old.exec(`CREATE TABLE generation_log (
+        id INTEGER PRIMARY KEY, date TEXT NOT NULL, prompt_id TEXT, prompt_text TEXT,
+        model TEXT, system_prompt TEXT, user_prompt TEXT, raw_response TEXT,
+        rationale TEXT, fell_back INTEGER NOT NULL DEFAULT 0, fallback_reason TEXT, at TEXT NOT NULL)`);
+      old.exec(`INSERT INTO generation_log (date, prompt_text, fell_back, at) VALUES ('2026-07-18', 'pre-existing', 0, 't')`);
+      old.close();
+
+      const migrated = Ledger.open(path);
+      const rows = migrated.generationLogFor("2026-07-18");
+      expect(rows[0]!.promptText).toBe("pre-existing"); // existing data survives
+      expect(rows[0]!.stance).toBeNull();
+    } finally {
+      for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
+    }
+  });
 });
 
 describe("days", () => {
@@ -186,11 +215,32 @@ describe("feedbackSince", () => {
 });
 
 describe("generation_log", () => {
+  test("round-trips the generator's declared stance", () => {
+    ledger.recordGeneration({
+      date: "2026-07-18", promptId: "gen-2026-07-18", promptText: "How did the defense go?",
+      model: "m", systemPrompt: "sys", userPrompt: "usr", rawResponse: "{}",
+      rationale: "following up on the thesis thread", stance: "exploit",
+      fellBack: false, fallbackReason: null, at: "t",
+    });
+    expect(ledger.generationLogFor("2026-07-18")[0]!.stance).toBe("exploit");
+  });
+
+  test("a fallback row has no stance, since no generator ran", () => {
+    ledger.recordGeneration({
+      date: "2026-07-18", promptId: null, promptText: null,
+      model: null, systemPrompt: null, userPrompt: null, rawResponse: null,
+      rationale: null, stance: null,
+      fellBack: true, fallbackReason: "LLM outage", at: "t",
+    });
+    expect(ledger.generationLogFor("2026-07-18")[0]!.stance).toBeNull();
+  });
+
   test("recordGeneration + generationLogFor round-trips a success-path row", () => {
     ledger.recordGeneration({
       date: "2026-07-18", promptId: "gen-2026-07-18", promptText: "What's on your mind?",
       model: "google/gemini-2.5-flash", systemPrompt: "sys", userPrompt: "usr",
       rawResponse: '{"prompt":"..."}', rationale: "exploit thesis thread",
+      stance: null,
       fellBack: false, fallbackReason: null, at: "t",
     });
     const rows = ledger.generationLogFor("2026-07-18");
@@ -203,6 +253,7 @@ describe("generation_log", () => {
       date: "2026-07-18", promptId: null, promptText: null,
       model: null, systemPrompt: null, userPrompt: null,
       rawResponse: null, rationale: null,
+      stance: null,
       fellBack: true, fallbackReason: "LLM outage", at: "t",
     });
     const rows = ledger.generationLogFor("2026-07-18");
@@ -213,7 +264,7 @@ describe("generation_log", () => {
     const entry = (date: string, promptText: string) => ({
       date, promptId: `gen-${date}`, promptText,
       model: "m", systemPrompt: "sys", userPrompt: "usr", rawResponse: "{}",
-      rationale: "r", fellBack: false, fallbackReason: null, at: `${date}T08:00:00Z`,
+      rationale: "r", stance: null, fellBack: false, fallbackReason: null, at: `${date}T08:00:00Z`,
     });
     ledger.recordGeneration(entry("2026-07-20", "third"));
     ledger.recordGeneration(entry("2026-07-18", "first"));
@@ -225,11 +276,12 @@ describe("generation_log", () => {
     ledger.recordGeneration({
       date: "2026-07-18", promptId: "gen-2026-07-18", promptText: "ok",
       model: "m", systemPrompt: "sys", userPrompt: "usr", rawResponse: "{}",
-      rationale: "r", fellBack: false, fallbackReason: null, at: "t1",
+      rationale: "r", stance: null, fellBack: false, fallbackReason: null, at: "t1",
     });
     ledger.recordGeneration({
       date: "2026-07-19", promptId: null, promptText: null,
       model: null, systemPrompt: null, userPrompt: null, rawResponse: null, rationale: null,
+      stance: null,
       fellBack: true, fallbackReason: "LLM outage", at: "t2",
     });
     expect(ledger.allGenerationLog().map((r) => r.fellBack)).toEqual([false, true]);

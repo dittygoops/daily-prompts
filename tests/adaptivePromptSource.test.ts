@@ -16,8 +16,8 @@ function scriptedLlm(behavior: (userPrompt: string) => string | Promise<string>)
   return { client, calls };
 }
 
-const okResponse = (prompt: string, usedIdeaId: number | null = null) =>
-  JSON.stringify({ prompt, rationale: "test rationale", usedIdeaId });
+const okResponse = (prompt: string, usedIdeaId: number | null = null, stance: string = "explore") =>
+  JSON.stringify({ prompt, stance, rationale: "test rationale", usedIdeaId });
 
 function makeSource(ledger: Ledger, memory: FakeMemory, client: LlmClient) {
   return new AdaptivePromptSource(memory, client, ledger, {
@@ -65,8 +65,65 @@ describe("AdaptivePromptSource", () => {
       model: "test-model",
       promptText: "What's a small win from today?",
       rationale: "test rationale",
+      stance: "explore",
       fellBack: false,
     });
+  });
+
+  test("rejects a response with no declared stance, so the ratio stays measurable", async () => {
+    const ledger = Ledger.open(":memory:");
+    const memory = new FakeMemory();
+    const { client } = scriptedLlm(() =>
+      JSON.stringify({ prompt: "What's a small win from today?", rationale: "r", usedIdeaId: null }),
+    );
+    await expect(makeSource(ledger, memory, client).nextPrompt("2026-07-20")).rejects.toThrow();
+  });
+
+  test("rejects a stance outside explore/exploit rather than storing free text", async () => {
+    const ledger = Ledger.open(":memory:");
+    const memory = new FakeMemory();
+    const { client } = scriptedLlm(() => okResponse("What's a small win?", null, "a bit of both"));
+    await expect(makeSource(ledger, memory, client).nextPrompt("2026-07-20")).rejects.toThrow();
+  });
+
+  test("assigns and persists exploit when a thread exists and nothing recent exploited it", async () => {
+    const ledger = Ledger.open(":memory:");
+    const memory = new FakeMemory();
+    await memory.add([{
+      type: "thread", text: "Nervous about their defense in August.", topic: "thesis",
+      person: "a", provenance: { dayId: 1, date: "2026-07-19", snippet: "s" },
+    }]);
+    // Declares explore; the assigned stance is what gets recorded, so a
+    // disagreeing model cannot quietly reintroduce the all-explore drift.
+    const { client, calls } = scriptedLlm(() => okResponse("How did the defense go?", null, "explore"));
+    await makeSource(ledger, memory, client).nextPrompt("2026-07-20");
+    expect(ledger.generationLogFor("2026-07-20")[0]!.stance).toBe("exploit");
+    expect(calls[0]!.user).toContain("EXPLOIT");
+  });
+
+  test("assigns explore when there is no thread to follow up on", async () => {
+    const ledger = Ledger.open(":memory:");
+    const memory = new FakeMemory();
+    const { client } = scriptedLlm(() => okResponse("What's a small win from today?"));
+    await makeSource(ledger, memory, client).nextPrompt("2026-07-20");
+    expect(ledger.generationLogFor("2026-07-20")[0]!.stance).toBe("explore");
+  });
+
+  test("retries when the generated prompt near-duplicates one already sent", async () => {
+    const ledger = Ledger.open(":memory:");
+    const day = ledger.createDay("2026-07-19", "p1", "What's an unexpected sound or noise you secretly enjoy?", "t");
+    ledger.resolveDay(day.id, "resolved_shared", "t2");
+    const memory = new FakeMemory();
+    let call = 0;
+    const { client } = scriptedLlm(() => {
+      call++;
+      return call === 1
+        ? okResponse("What's an unexpected sound you secretly enjoy?")
+        : okResponse("What's a place you keep meaning to visit?");
+    });
+    const prompt = await makeSource(ledger, memory, client).nextPrompt("2026-07-20");
+    expect(call).toBe(2);
+    expect(prompt.text).toBe("What's a place you keep meaning to visit?");
   });
 
   test("throws when the LLM call itself rejects", async () => {

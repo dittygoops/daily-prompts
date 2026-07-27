@@ -14,6 +14,7 @@ const richContext: PersonContext = {
 
 const baseInput = {
   today: "2026-07-20",
+  stance: "explore" as const,
   names: { a: "Alex", b: "Sam" } as const,
   contextA: emptyContext,
   contextB: emptyContext,
@@ -58,6 +59,50 @@ describe("ADAPTIVE_SYSTEM_PROMPT", () => {
   test("instructs that both people always get the identical prompt", () => {
     const sys = ADAPTIVE_SYSTEM_PROMPT.toLowerCase();
     expect(sys).toMatch(/identical|same prompt|both/);
+  });
+});
+
+describe("explore/exploit stance", () => {
+  test("requires the generator to declare a stance in its JSON output", () => {
+    expect(ADAPTIVE_SYSTEM_PROMPT).toContain('"stance"');
+    expect(ADAPTIVE_SYSTEM_PROMPT).toContain("exploit");
+    expect(ADAPTIVE_SYSTEM_PROMPT).toContain("explore");
+  });
+
+  test("states the stance is assigned rather than the model's to choose", () => {
+    // Live behaviour was 0/6 exploit while the model picked for itself, and
+    // still 0/3 after being given an explicit ratio target, so the choice
+    // moved into decideStance and arrives here as an instruction.
+    expect(ADAPTIVE_SYSTEM_PROMPT).toMatch(/assigned to you|not yours to choose/i);
+  });
+
+  test("renders the assigned stance prominently in the user prompt", () => {
+    const user = buildGenerationUserPrompt({ ...baseInput, stance: "exploit" });
+    expect(user).toContain("EXPLOIT");
+  });
+
+  test("spells out that a broadly-answerable question does not count as an exploit", () => {
+    // The exact failure seen live: it read the threads, then asked
+    // "what are you looking forward to this week?" and called it exploit.
+    expect(ADAPTIVE_SYSTEM_PROMPT).toMatch(/would make no sense asked of anybody else|by name/i);
+  });
+
+  test("shows the recent stance history so the generator can see its own drift", () => {
+    const user = buildGenerationUserPrompt({
+      ...baseInput,
+      history: [
+        { date: "2026-07-25", text: "What's one thing you're improving?", stance: "explore", a: { outcome: "answered", responseLength: 40 }, b: { outcome: "answered", responseLength: 30 } },
+        { date: "2026-07-24", text: "What's one thing you're learning?", stance: "explore", a: { outcome: "answered", responseLength: 20 }, b: { outcome: "skipped", responseLength: null } },
+      ],
+    });
+    expect(user).toMatch(/explore/i);
+  });
+});
+
+describe("template variation", () => {
+  test("system prompt forbids reusing a recent sentence frame", () => {
+    const sys = ADAPTIVE_SYSTEM_PROMPT.toLowerCase();
+    expect(sys).toMatch(/sentence (frame|structure)|template|phrasing|opening/);
   });
 });
 
