@@ -106,8 +106,8 @@ Each is single-purpose, following the pure-logic-separated-from-IO pattern alrea
 
 Deterministic, no randomness, so it is testable and predictable:
 
-- Photo days are numbered in order. Even-numbered photo days are participant `a`'s turn, odd-numbered are `b`'s.
-- If the person whose turn it is did not send a photo, the other person's photo is used instead. A turn is a preference, not a veto.
+- Photo days are numbered in order, starting at 1. Even-numbered photo days are participant `a`'s turn, odd-numbered are `b`'s. Photo day 1 is therefore odd, so **`b` takes the first turn**. This is arbitrary but fixed, and stated explicitly because the natural reading of "a then b" suggests the opposite.
+- If the person whose turn it is did not send a photo, the other person's photo is used instead. A turn is a preference, not a veto. **The turn is still consumed in that case**, so a person who never sends photos burns a slot on each of their turns. That is intentional: the alternative, holding their turn open indefinitely, produces the same visible outcome (the other person's photo is shown) while making the counter unpredictable.
 - If neither sent a photo, the background does not change and the turn counter does not advance, so nobody loses their turn to a day both people missed.
 
 ### Photo lifecycle
