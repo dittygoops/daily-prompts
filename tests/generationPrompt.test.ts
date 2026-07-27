@@ -179,3 +179,14 @@ describe("buildGenerationUserPrompt", () => {
     expect(user.length).toBeGreaterThan(0);
   });
 });
+
+describe("both-answerable constraint", () => {
+  test("requires an exploit to be answerable by both people", () => {
+    // Live failure 2026-07-27: "How did the psychic reading party with Cora
+    // and her mom end up going?" was built on one person's thread, leaving
+    // the other with no way to respond to their own daily question.
+    const sys = ADAPTIVE_SYSTEM_PROMPT.toLowerCase();
+    expect(sys).toMatch(/both people must be able to answer/);
+    expect(sys).toMatch(/widen|shared category|different thread/);
+  });
+});
