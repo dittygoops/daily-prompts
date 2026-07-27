@@ -10,6 +10,7 @@ import { nextDispatchAt, todayInTz } from "./src/scheduler";
 import { OpenRouterClient } from "./src/llm/openrouter";
 import { SupermemoryClient } from "./src/memory/supermemory";
 import { processPending } from "./src/extraction/pipeline";
+import { scorePending } from "./src/eval/scoring";
 import { checkAndSendNudges } from "./src/nudge/pipeline";
 import { checkAndSendWeeklyRecap } from "./src/recap/checker";
 
@@ -115,6 +116,22 @@ async function runExtraction(): Promise<void> {
   }
 }
 
+// Rolling prompt scoring (eval harness phase 3): judges each generated
+// prompt once and records the verdict, so quality drift is visible in the
+// ledger instead of only when a report is run by hand. Shares the
+// extraction poller's tick rather than adding a loop of its own; it costs
+// one judge call per generated day and no-ops the rest of the time.
+async function runScoring(): Promise<void> {
+  try {
+    const result = await scorePending({ ledger, llm: extractionLlm, model: config.extraction.model, log });
+    if (result.scored > 0 || result.failed > 0) {
+      log(`prompt scoring pass: ${result.scored} scored, ${result.failed} failed`);
+    }
+  } catch (err) {
+    log(`PROMPT SCORING PASS FAILED: ${err}`);
+  }
+}
+
 async function extractionLoop(): Promise<never> {
   while (true) {
     await new Promise((resolve) => setTimeout(resolve, config.extraction.pollMinutes * 60_000));
@@ -122,6 +139,7 @@ async function extractionLoop(): Promise<never> {
     // guarantees the loop itself can never die and silently stop polling.
     try {
       await runExtraction();
+      await runScoring();
     } catch (err) {
       log(`extraction loop iteration crashed unexpectedly: ${err}`);
     }
@@ -200,6 +218,7 @@ async function recapLoop(): Promise<never> {
 
 await reconcile();
 await runExtraction(); // startup catch-up: drain any backlog before the main loop takes over
+await runScoring(); // same, for any prompts generated while this was down
 void extractionLoop(); // fire-and-forget: runs concurrently with dispatch, never blocks it
 void nudgeLoop(); // fire-and-forget: same independence guarantee
 if (config.weeklyRecap.enabled) {

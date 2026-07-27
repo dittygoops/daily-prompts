@@ -36,6 +36,51 @@ describe("schema migration", () => {
   });
 });
 
+describe("prompt scores", () => {
+  const gen = (date: string, text: string | null, fellBack = false) => ({
+    date, promptId: text ? `gen-${date}` : null, promptText: text,
+    model: "m", systemPrompt: "s", userPrompt: "u", rawResponse: "{}",
+    rationale: "r", stance: "explore", fellBack, fallbackReason: null, at: "t",
+  });
+
+  test("a generated prompt with no score row is pending", () => {
+    ledger.recordGeneration(gen("2026-07-18", "What's a small win?"));
+    expect(ledger.unscoredGenerations().map((r) => r.date)).toEqual(["2026-07-18"]);
+  });
+
+  test("fallback rows are never scored, since the static bank has its own baseline", () => {
+    ledger.recordGeneration(gen("2026-07-18", null, true));
+    expect(ledger.unscoredGenerations()).toEqual([]);
+  });
+
+  test("recording a score removes it from the pending list and round-trips", () => {
+    ledger.recordGeneration(gen("2026-07-18", "What's a small win?"));
+    const pending = ledger.unscoredGenerations()[0]!;
+    ledger.recordPromptScore({
+      generationId: pending.id, date: pending.date,
+      answerable: true, singleQuestion: true, appropriateLength: true, emotionallySafe: false,
+      passedAll: false, failureReasons: "emotionallySafe: too pointed", model: "judge-model", at: "t2",
+    });
+    expect(ledger.unscoredGenerations()).toEqual([]);
+    const scores = ledger.promptScores();
+    expect(scores.length).toBe(1);
+    expect(scores[0]).toMatchObject({ date: "2026-07-18", emotionallySafe: false, passedAll: false });
+  });
+
+  test("scoring is idempotent per generation, so a re-run cannot double-count", () => {
+    ledger.recordGeneration(gen("2026-07-18", "What's a small win?"));
+    const pending = ledger.unscoredGenerations()[0]!;
+    const score = {
+      generationId: pending.id, date: pending.date,
+      answerable: true, singleQuestion: true, appropriateLength: true, emotionallySafe: true,
+      passedAll: true, failureReasons: null, model: "judge-model", at: "t2",
+    };
+    ledger.recordPromptScore(score);
+    ledger.recordPromptScore(score);
+    expect(ledger.promptScores().length).toBe(1);
+  });
+});
+
 describe("days", () => {
   test("createDay starts a dispatched day with both persons awaiting", () => {
     const day = ledger.createDay("2026-07-17", "p1", "What's your favorite thing to cook?", "2026-07-17T08:30:00-07:00");

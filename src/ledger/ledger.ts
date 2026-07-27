@@ -79,6 +79,31 @@ export interface GenerationLogRow extends GenerationLogEntry {
   id: number;
 }
 
+export interface PromptScoreEntry {
+  generationId: number;
+  date: string;
+  answerable: boolean;
+  singleQuestion: boolean;
+  appropriateLength: boolean;
+  emotionallySafe: boolean;
+  passedAll: boolean;
+  /** Judge reasons for the failing axes only, so a passing row stays small. */
+  failureReasons: string | null;
+  model: string | null;
+  at: string;
+}
+
+export interface PromptScoreRow extends PromptScoreEntry {
+  id: number;
+}
+
+interface PromptScoreDbRow {
+  id: number; generation_id: number; date: string;
+  answerable: number; single_question: number; appropriate_length: number;
+  emotionally_safe: number; passed_all: number;
+  failure_reasons: string | null; model: string | null; at: string;
+}
+
 interface GenerationLogDbRow {
   id: number; date: string; prompt_id: string | null; prompt_text: string | null;
   model: string | null; system_prompt: string | null; user_prompt: string | null;
@@ -478,6 +503,63 @@ export class Ledger {
       .query<GenerationLogDbRow, []>(`SELECT * FROM generation_log ORDER BY date, id`)
       .all();
     return rows.map(toGenerationLogRow);
+  }
+
+  /** Generated prompts still awaiting a quality score, oldest first.
+   * Fallback rows are excluded: those came from the static bank, which has
+   * its own scored baseline in docs/eval-baseline-static-bank.md. */
+  unscoredGenerations(): GenerationLogRow[] {
+    const rows = this.db
+      .query<GenerationLogDbRow, []>(
+        `SELECT g.* FROM generation_log g
+         LEFT JOIN prompt_scores s ON s.generation_id = g.id
+         WHERE s.id IS NULL AND g.fell_back = 0 AND g.prompt_text IS NOT NULL
+         ORDER BY g.date, g.id`,
+      )
+      .all();
+    return rows.map(toGenerationLogRow);
+  }
+
+  /** Idempotent per generation row: a re-run or a restart mid-pass can
+   * never double-count a day's score. */
+  recordPromptScore(entry: PromptScoreEntry): void {
+    this.db
+      .query(
+        `INSERT OR IGNORE INTO prompt_scores
+           (generation_id, date, answerable, single_question, appropriate_length, emotionally_safe, passed_all, failure_reasons, model, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        entry.generationId,
+        entry.date,
+        entry.answerable ? 1 : 0,
+        entry.singleQuestion ? 1 : 0,
+        entry.appropriateLength ? 1 : 0,
+        entry.emotionallySafe ? 1 : 0,
+        entry.passedAll ? 1 : 0,
+        entry.failureReasons,
+        entry.model,
+        entry.at,
+      );
+  }
+
+  promptScores(): PromptScoreRow[] {
+    const rows = this.db
+      .query<PromptScoreDbRow, []>(`SELECT * FROM prompt_scores ORDER BY date, id`)
+      .all();
+    return rows.map((r) => ({
+      id: r.id,
+      generationId: r.generation_id,
+      date: r.date,
+      answerable: r.answerable === 1,
+      singleQuestion: r.single_question === 1,
+      appropriateLength: r.appropriate_length === 1,
+      emotionallySafe: r.emotionally_safe === 1,
+      passedAll: r.passed_all === 1,
+      failureReasons: r.failure_reasons,
+      model: r.model,
+      at: r.at,
+    }));
   }
 
   /** Record a prompt idea a participant suggested (via feedback). Returns

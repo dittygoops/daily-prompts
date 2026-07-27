@@ -65,6 +65,23 @@ CREATE TABLE IF NOT EXISTS generation_log (
   at TEXT NOT NULL
 );
 
+-- Rolling quality scores for generated prompts (eval harness phase 3), so
+-- drift is visible from the ledger itself rather than only when a report is
+-- run by hand. One row per generation_log row that produced a prompt.
+CREATE TABLE IF NOT EXISTS prompt_scores (
+  id INTEGER PRIMARY KEY,
+  generation_id INTEGER NOT NULL UNIQUE REFERENCES generation_log(id),
+  date TEXT NOT NULL,
+  answerable INTEGER NOT NULL,
+  single_question INTEGER NOT NULL,
+  appropriate_length INTEGER NOT NULL,
+  emotionally_safe INTEGER NOT NULL,
+  passed_all INTEGER NOT NULL,
+  failure_reasons TEXT,
+  model TEXT,
+  at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS recap_log (
   id INTEGER PRIMARY KEY,
   week_start TEXT NOT NULL,

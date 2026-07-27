@@ -46,7 +46,9 @@ Observations are stored with the date they were derived from, and the extractor 
 
 ### Adaptive prompt generation
 
-Each day's question is generated fresh from both people's memory context (facts, open threads, interests, topic coverage), recent prompt history (so it doesn't repeat), and any feedback or explicitly suggested prompt ideas. It balances following up on a known thread against exploring new territory, at the model's judgment. If generation fails for any reason — OpenRouter down, a malformed response, Supermemory unreachable — it falls back to the static 30-question bank (`data/prompts.json`) so the daily message always goes out; every fallback is logged loudly and recorded in the ledger's `generation_log` table alongside every successful generation's full context and reasoning, for later review. Suggested prompt ideas are tracked durably (never silently expire) until the generator actually uses one.
+Each day's question is generated fresh from both people's memory context (facts, open threads, interests, topic coverage), recent prompt history (so it doesn't repeat), and any feedback or explicitly suggested prompt ideas.
+
+Whether the day follows up on a known thread (exploit) or opens new territory (explore) is decided in code, not by the model: `src/prompts/stance.ts` assigns exploit when either person has an open thread and none of the recent days exploited one, giving a roughly 1-in-3 cadence, and the generator is told which mode it is in. This started as a model judgment call and it chose explore on 6 out of 6 live days, so the decision moved into code. The assigned stance is recorded in `generation_log.stance`. A generated prompt that near-duplicates one already sent is rejected and regenerated, using the same deterministic content-word check the eval harness uses. If generation fails for any reason — OpenRouter down, a malformed response, Supermemory unreachable — it falls back to the static 30-question bank (`data/prompts.json`) so the daily message always goes out; every fallback is logged loudly and recorded in the ledger's `generation_log` table alongside every successful generation's full context and reasoning, for later review. Suggested prompt ideas are tracked durably (never silently expire) until the generator actually uses one.
 
 ### Reminder nudges
 
@@ -55,6 +57,17 @@ If one or both of you hasn't answered yet, a gentle nudge can go out via three i
 ### Weekly recap
 
 Optional (`weeklyRecap.enabled`, default `false`) — both of you get an identical recap covering the trailing 7 days: mechanical stats (days answered together, topics touched, pulled from the ledger, never from the LLM) plus an LLM-synthesized highlight paragraph grounded in that week's actual answers. If the highlight generation fails, the recap still goes out with just the mechanical stats. It's triggered by state, not a fixed clock time: `weeklyRecap.dayOfWeek` (0=Sunday..6=Saturday) names the day that ends each week, and the recap fires as soon as that day's prompt has actually resolved, whether both of you answered (same-day), one did, or neither did (it fires once the next day's prompt dispatches and expires it). A poller checks this every `weeklyRecap.pollMinutes` (default 15); no separate missed-recap handling is needed since the next poll after any downtime catches up naturally.
+
+### Prompt quality scoring
+
+Every generated prompt is judged once against the rubric in `src/eval/rubric.ts` (answerable, single question, appropriate length, emotionally safe) and the verdict is written to the ledger's `prompt_scores` table, so quality drift shows up in the data rather than only when a report is run by hand. This runs on the extraction poller's tick, costs one judge call per generated day, and never blocks anything: a failed judging leaves the row pending for a later pass. Two on-demand reports go deeper:
+
+```bash
+bun scripts/eval-static-bank.ts config.json        # scores the 30 static prompts -> docs/eval-baseline-static-bank.md
+bun scripts/eval-generated-prompts.ts config.json  # scores real generated prompts -> docs/eval-generated-prompts.md
+```
+
+The generated-prompt report adds what a single-prompt score cannot see: near-duplication against everything sent before it, reuse of an opening sentence frame, the explore/exploit mix, and the fallback rate.
 
 ### Rebuilding memory
 
