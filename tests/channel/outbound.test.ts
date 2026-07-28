@@ -69,6 +69,15 @@ describe("outboundContents", () => {
     expect(items).toHaveLength(2);
     expect(typeof items[0]).not.toBe("string"); // the image builder
     expect(typeof items[1]).not.toBe("string"); // text+effect, also a builder
+
+    // With the effect dropped the text stays a raw string, which is what
+    // actually pins the ordering: the image is first and the question second,
+    // never the reverse. Both are builders in the shape above, so that case
+    // alone cannot distinguish the two positions.
+    const noEffect = outboundContents({ text: message.text, image: message.image });
+    expect(noEffect).toHaveLength(2);
+    expect(typeof noEffect[0]).not.toBe("string");
+    expect(noEffect[1]).toBe("hi");
   });
 
   // The real proof that intensity "off" is byte-identical on the wire: a
