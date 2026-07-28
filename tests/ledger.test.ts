@@ -498,3 +498,56 @@ describe("per-person prompt history for novelty", () => {
     expect(ledger.personPromptsBefore("2026-07-18", "a")).toEqual([]);
   });
 });
+
+describe("animal image recency", () => {
+  test("returns [] on a fresh ledger", () => {
+    expect(ledger.recentAnimalImageIds(5)).toEqual([]);
+  });
+
+  test("newest first, skips days with no image, respects the limit", () => {
+    const d1 = ledger.createDay("2026-07-17", "p1", "x", "t");
+    const d2 = ledger.createDay("2026-07-18", "p2", "x", "t");
+    const d3 = ledger.createDay("2026-07-19", "p3", "x", "t");
+    const d4 = ledger.createDay("2026-07-20", "p4", "x", "t");
+    ledger.setDayAnimalImage(d1.id, "cataas:sha256-aaa");
+    // d2 gets no image: fetch disabled or failed that day.
+    ledger.setDayAnimalImage(d3.id, "cataas:sha256-ccc");
+    ledger.setDayAnimalImage(d4.id, "cataas:sha256-ddd");
+    void d2;
+
+    expect(ledger.recentAnimalImageIds(10)).toEqual([
+      "cataas:sha256-ddd",
+      "cataas:sha256-ccc",
+      "cataas:sha256-aaa",
+    ]);
+    expect(ledger.recentAnimalImageIds(2)).toEqual(["cataas:sha256-ddd", "cataas:sha256-ccc"]);
+  });
+
+  test("setDayAnimalImage is idempotent: last write wins, still one entry", () => {
+    const day = ledger.createDay("2026-07-17", "p1", "x", "t");
+    ledger.setDayAnimalImage(day.id, "cataas:sha256-first");
+    ledger.setDayAnimalImage(day.id, "cataas:sha256-second");
+    expect(ledger.recentAnimalImageIds(10)).toEqual(["cataas:sha256-second"]);
+  });
+
+  test("migration adds animal_image_id to a days table created before it existed", () => {
+    const path = join(tmpdir(), `daily-prompts-animal-${Date.now()}.db`);
+    try {
+      const old = new Database(path, { create: true, strict: true });
+      old.exec(`CREATE TABLE days (id INTEGER PRIMARY KEY, date TEXT NOT NULL UNIQUE, prompt_id TEXT NOT NULL,
+        prompt_text TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'dispatched', dispatched_at TEXT, resolved_at TEXT)`);
+      old.exec(`INSERT INTO days (date, prompt_id, prompt_text, dispatched_at) VALUES ('2026-07-17','p1','x','t')`);
+      old.close();
+
+      const migrated = Ledger.open(path);
+      const check = new Database(path, { readonly: true });
+      const columns = check.query(`PRAGMA table_info(days)`).all() as { name: string }[];
+      check.close();
+      expect(columns.some((c) => c.name === "animal_image_id")).toBe(true);
+      // Pre-existing rows migrate to null: no backfill value exists for them.
+      expect(migrated.recentAnimalImageIds(10)).toEqual([]);
+    } finally {
+      for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
+    }
+  });
+});

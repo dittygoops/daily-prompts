@@ -2,6 +2,7 @@ import type { Channel } from "../channel/types";
 import type { PersonId } from "../config";
 import type { Ledger } from "../ledger/ledger";
 import type { LlmClient } from "../llm/types";
+import type { EffectIntensity } from "../engine/effects";
 import { addDays, mostRecentDayOfWeek } from "../scheduler";
 import { sendWeeklyRecap } from "./send";
 
@@ -15,6 +16,8 @@ export interface RecapCheckerDeps {
   timezone: string;
   log: (msg: string) => void;
   now?: () => Date;
+  /** Omit for no effect, which is what tests and an unconfigured deployment do. */
+  intensity?: EffectIntensity;
 }
 
 /** Polled by index.ts. Triggered by state, not a clock: finds the most
@@ -35,7 +38,15 @@ export async function checkAndSendWeeklyRecap(deps: RecapCheckerDeps): Promise<{
   if (deps.ledger.hasRecapFor(weekStart)) return { sent: false };
 
   await sendWeeklyRecap(
-    { ledger: deps.ledger, channel: deps.channel, llm: deps.llm, names: deps.names, model: deps.model, log: deps.log },
+    {
+      ledger: deps.ledger,
+      channel: deps.channel,
+      llm: deps.llm,
+      names: deps.names,
+      model: deps.model,
+      log: deps.log,
+      intensity: deps.intensity,
+    },
     weekStart,
     weekEnd,
   );

@@ -36,4 +36,30 @@ describe("sendWeeklyRecap", () => {
     await sendWeeklyRecap(deps, "2026-07-13", "2026-07-19");
     expect(channel.sentTo("a").length).toBe(countAfterFirst);
   });
+
+  test("intensity 'playful' attaches the 'celebrate' effect to both sends", async () => {
+    const ledger = Ledger.open(":memory:");
+    seedWeek(ledger);
+    const channel = new FakeChannel();
+    const llm: LlmClient = { async complete() { return JSON.stringify({ topics: "topics", highlight: "x" }); } };
+    await sendWeeklyRecap(
+      { ledger, channel, llm, names, model: "m", log: () => {}, intensity: "playful" },
+      "2026-07-13",
+      "2026-07-19",
+    );
+    expect(channel.outboundTo("a")[0]?.effect).toBe("celebrate");
+    expect(channel.outboundTo("b")[0]?.effect).toBe("celebrate");
+  });
+
+  // FakeChannel normalizes a bare string to { text }, so "bare string" isn't
+  // observable here; effect === undefined is the strongest assertion at this
+  // layer (the wire-level proof lives in tests/channel/outbound.test.ts).
+  test("omitting intensity attaches no effect", async () => {
+    const ledger = Ledger.open(":memory:");
+    seedWeek(ledger);
+    const channel = new FakeChannel();
+    const llm: LlmClient = { async complete() { return JSON.stringify({ topics: "topics", highlight: "x" }); } };
+    await sendWeeklyRecap({ ledger, channel, llm, names, model: "m", log: () => {} }, "2026-07-13", "2026-07-19");
+    expect(channel.outboundTo("a")[0]?.effect).toBeUndefined();
+  });
 });

@@ -61,6 +61,34 @@ const rawConfigSchema = z.object({
       model: z.string().min(1).default("google/gemini-2.5-flash"),
     })
     .default({ enabled: false, dayOfWeek: 0, pollMinutes: 15, model: "google/gemini-2.5-flash" }),
+  personality: z
+    .object({
+      // Defaults to "off", not "playful", on purpose: a schema default of
+      // "playful" would silently turn the whole feature on the next time an
+      // existing config.json (written before this block existed) restarts
+      // with no personality key at all. This project has already had a
+      // feature fire unannounced to a participant that way. "playful" is
+      // the owner's preferred steady state, but that gets set explicitly in
+      // config.json, never assumed by the schema.
+      intensity: z.enum(["off", "subtle", "playful"]).default("off"),
+      // Independently switchable from the rest of the effect policy: an
+      // animal image is an outbound network fetch that can fail or hang,
+      // while other effects are a local vendor flag lookup, and the two
+      // have different annoyance profiles if they misfire. Ignored entirely
+      // when intensity is "off".
+      animalImage: z.boolean().default(true),
+      // Hard outer wall-clock deadline for the whole animal image fetch.
+      // HttpAnimalImageSource.fetch (src/media/animals.ts) makes up to 3
+      // attempts, and each attempt makes two independently timed HTTP calls
+      // (a provider `resolve`, then `downloadImage`), each with its own 8s
+      // AbortSignal.timeout. Those can compound to roughly 48s across 3
+      // attempts, not 24s: the loop does not retry on error, only a recency
+      // id collision causes a re-loop, so a real fetch failure propagates
+      // immediately, but a slow-but-successful run can legitimately take
+      // close to the full 48s. Dispatch must not stall that long.
+      animalTimeoutMs: z.number().int().positive().default(10_000),
+    })
+    .default({ intensity: "off", animalImage: true, animalTimeoutMs: 10_000 }),
 });
 
 export interface Config {
@@ -76,6 +104,12 @@ export interface Config {
   generation: { model: string; historyWindowDays: number; feedbackWindowDays: number; contextBudgetChars: number };
   nudge: { afterHours: number; beforeDueHours: number; pollMinutes: number };
   weeklyRecap: { enabled: boolean; dayOfWeek: number; pollMinutes: number; model: string };
+  // The "off" | "subtle" | "playful" union is duplicated from EffectIntensity
+  // (src/engine/effects.ts) on purpose: this file currently imports nothing
+  // but zod and is depended on by nearly everything, so importing from
+  // src/engine/ here would invert the dependency direction. The duplication
+  // is guarded by a compile-time assertion in tests/config.test.ts.
+  personality: { intensity: "off" | "subtle" | "playful"; animalImage: boolean; animalTimeoutMs: number };
   spectrum: { projectId: string; projectSecret: string };
   openrouter: { apiKey: string };
   supermemory: { apiKey: string; baseUrl: string };

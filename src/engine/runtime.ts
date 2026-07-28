@@ -1,9 +1,19 @@
 import type { PersonId } from "../config";
-import type { Channel } from "../channel/types";
+// Aliased: inside this file "Effect" already means the state machine's
+// effect union (imported below from ./stateMachine), so the channel's
+// semantic Effect ("celebrate" | "emphasize" | "gentle") needs its own name.
+import type { Channel, Outbound, Effect as ChannelEffect } from "../channel/types";
 import type { Ledger } from "../ledger/ledger";
 import type { PromptSource } from "../prompts/types";
 import { DayMachine, type Effect, type Event, type MachineState, type PromptRef } from "./stateMachine";
 import { SettleTimers, type TimerClock } from "./settle";
+import { effectFor, effectEventForKind, type EffectIntensity } from "./effects";
+import type { AnimalImage, AnimalImageSource } from "../media/animals";
+
+// Two weeks is long enough that a repeat is not noticeable and short enough
+// that the avoid-list never grows unbounded; HttpAnimalImageSource only does
+// `recentIds.includes(id)` on up to 3 attempts, so list length costs nothing.
+const RECENT_ANIMAL_WINDOW = 14;
 
 export interface EngineRuntimeOptions {
   names: Record<PersonId, string>;
@@ -14,6 +24,10 @@ export interface EngineRuntimeOptions {
   timerClock?: TimerClock;
   now?: () => string;
   log?: (msg: string) => void;
+  /** Omit to disable all personality enrichment, which is what tests do. */
+  personality?: { intensity: EffectIntensity; animalImage: boolean; animalTimeoutMs: number };
+  /** Omit and no image is ever attached, regardless of intensity. */
+  animals?: AnimalImageSource;
 }
 
 /** Owns the machine state and executes its effects against the ledger,
@@ -30,6 +44,9 @@ export class EngineRuntime {
   // Bumped on every timer (re)start; a firing whose generation is stale was
   // superseded by a later answer part and must not finalize early.
   private readonly settleGen: Record<PersonId, number> = { a: 0, b: 0 };
+  // Set for the duration of one dispatch's event handling only (see
+  // dispatch's try/finally); the prompt Send effects it fans out to read it.
+  private pendingAnimal: AnimalImage | null = null;
 
   constructor(private readonly opts: EngineRuntimeOptions) {
     this.machine = new DayMachine({ names: opts.names });
@@ -52,14 +69,67 @@ export class EngineRuntime {
    * interleave. Unlike fire-and-forget inbound handling, failures propagate
    * to the caller so a broken dispatch is loud. */
   async dispatch(date: string): Promise<void> {
-    const daily = await this.opts.promptSource.nextPrompts(date);
-    await this.enqueue({
-      type: "DispatchDue",
-      date,
-      at: this.now(),
-      prompts: daily.prompts,
-      theme: daily.theme,
-    });
+    // Concurrent, not sequential: the animal fetch rides alongside the
+    // adaptive generator's LLM round trip, which already dominates dispatch
+    // latency, so in the normal case it adds no observable delay.
+    const [daily, animal] = await Promise.all([
+      this.opts.promptSource.nextPrompts(date),
+      this.fetchAnimal(),
+    ]);
+    this.pendingAnimal = animal;
+    try {
+      await this.enqueue({
+        type: "DispatchDue",
+        date,
+        at: this.now(),
+        prompts: daily.prompts,
+        theme: daily.theme,
+      });
+    } finally {
+      // Load-bearing: clearing here (rather than after each Send effect
+      // finishes) still guarantees no stale image survives past this
+      // dispatch. Clearing only on success would leave a stale image alive
+      // whenever the enqueued event throws, and tomorrow's dispatch would
+      // silently reuse today's cat until the next successful one overwrote
+      // it. enqueue returns the event's own promise, which rejects on
+      // failure, so this finally always runs before dispatch returns.
+      this.pendingAnimal = null;
+    }
+  }
+
+  /** The single place animal fetch failure is absorbed; must NEVER throw, so
+   * the Promise.all in dispatch can never reject because of it. Returns null
+   * on ANY failure (network error, non-image body, oversize, or simply
+   * exceeding the configured deadline); the prompt then goes out with text
+   * only. This adds no validation of its own: HttpAnimalImageSource already
+   * enforces per-request timeouts, a size cap, and magic-byte mime
+   * detection; it only absorbs.
+   *
+   * The Promise.race deadline exists because the source's own per-request 8s
+   * timeouts can compound to roughly 48s (up to 3 attempts, each doing a
+   * provider resolve plus an image download, each separately timed).
+   * Dispatch must not stall that long. The losing fetch promise is left to
+   * settle and be garbage collected; it holds no lock and writes nothing. */
+  private async fetchAnimal(): Promise<AnimalImage | null> {
+    const p = this.opts.personality;
+    if (!p || p.intensity === "off" || !p.animalImage || !this.opts.animals) return null;
+    try {
+      const recent = this.opts.ledger.recentAnimalImageIds(RECENT_ANIMAL_WINDOW);
+      return await Promise.race([
+        this.opts.animals.fetch(recent),
+        new Promise<null>((resolve) => {
+          const t = setTimeout(() => resolve(null), p.animalTimeoutMs);
+          // Bun keeps the process alive for a pending timer; this fetch races
+          // against a real network call the process is already waiting on
+          // regardless, so unref lets a shutdown proceed without waiting out
+          // a stray timeout instead of holding the event loop open for it.
+          t.unref?.();
+        }),
+      ]);
+    } catch (err) {
+      this.log(`animal image fetch failed, sending prompt without one: ${err}`);
+      return null;
+    }
   }
 
   /** Serialize event handling so effects never interleave. Returns the
@@ -95,6 +165,30 @@ export class EngineRuntime {
     this.state = state;
   }
 
+  /** Decides what actually goes on the wire for a Send effect. Bare-string
+   * returns are the property that makes intensity "off" (or any kind with no
+   * moment) a byte-identical diff against pre-personality behaviour, at both
+   * the channel and the ledger. */
+  private outboundFor(effect: Extract<Effect, { type: "Send" }>): string | Outbound {
+    const p = this.opts.personality;
+    if (!p || p.intensity === "off") return effect.text;
+
+    const event = effectEventForKind(effect.kind);
+    const fx: ChannelEffect | null = event ? effectFor(event, p.intensity) : null;
+    const image =
+      effect.kind === "prompt" && p.animalImage && this.pendingAnimal !== null
+        ? this.pendingAnimal
+        : null;
+
+    if (!image && !fx) return effect.text;
+
+    return {
+      text: effect.text,
+      ...(image && { image: { bytes: image.bytes, mimeType: image.mimeType, name: image.name } }),
+      ...(fx && { effect: fx }),
+    };
+  }
+
   private async execute(effect: Effect): Promise<void> {
     const ledger = this.opts.ledger;
     switch (effect.type) {
@@ -122,23 +216,55 @@ export class EngineRuntime {
       case "Send": {
         // A delivery failure must never abort the rest of the day's effects
         // (e.g. the other person's prompt); it is logged and recorded instead.
+        const outbound = this.outboundFor(effect);
+        const enriched = typeof outbound !== "string";
+        let usedFallback = false;
         try {
-          await this.opts.channel.send(effect.person, effect.text);
+          await this.opts.channel.send(effect.person, outbound);
         } catch (err) {
-          this.log(`send to ${effect.person} (${effect.kind}) failed: ${err}`);
-          if (this.currentDayId !== null) {
-            this.opts.ledger.recordMessage({
-              dayId: this.currentDayId,
-              person: effect.person,
-              direction: "out",
-              kind: "send_failed",
-              text: `${effect.kind}: ${err}`,
-              at: this.now(),
-            });
+          if (!enriched) {
+            this.log(`send to ${effect.person} (${effect.kind}) failed: ${err}`);
+            if (this.currentDayId !== null) {
+              this.opts.ledger.recordMessage({
+                dayId: this.currentDayId,
+                person: effect.person,
+                direction: "out",
+                kind: "send_failed",
+                text: `${effect.kind}: ${err}`,
+                at: this.now(),
+              });
+            }
+            break;
           }
-          break;
+          // outboundContents (src/channel/spectrum.ts) orders image before
+          // text and SpectrumChannel.send loops the contents sequentially,
+          // so a vendor-rejected attachment would otherwise abort the whole
+          // send and the daily question would never arrive. One plain-text
+          // retry recovers that: the flourish is expendable, the message
+          // is not.
+          this.log(`enriched send to ${effect.person} (${effect.kind}) failed, retrying as plain text: ${err}`);
+          try {
+            await this.opts.channel.send(effect.person, effect.text);
+            usedFallback = true;
+          } catch (err2) {
+            this.log(`send to ${effect.person} (${effect.kind}) failed: ${err2}`);
+            if (this.currentDayId !== null) {
+              this.opts.ledger.recordMessage({
+                dayId: this.currentDayId,
+                person: effect.person,
+                direction: "out",
+                kind: "send_failed",
+                text: `${effect.kind}: ${err2}`,
+                at: this.now(),
+              });
+            }
+            break;
+          }
         }
         if (this.currentDayId !== null) {
+          // The ledger message row records the plain text regardless of
+          // enrichment: the image and the effect are transport decoration
+          // and do not belong in message history.
           ledger.recordMessage({
             dayId: this.currentDayId,
             person: effect.person,
@@ -151,6 +277,20 @@ export class EngineRuntime {
             ledger.markShareSent(this.currentDayId, effect.person, this.now());
           } else if (effect.kind === "feedback_ask") {
             ledger.markFeedbackAskSent(this.currentDayId, effect.person, this.now());
+          }
+          // Written only after a successful send that actually carried the
+          // image (not the plain-text-fallback path): the avoid-list must
+          // never contain an image nobody saw. CreateDay sets currentDayId
+          // before any Send effect runs, so this is always safe here.
+          if (
+            enriched &&
+            !usedFallback &&
+            effect.kind === "prompt" &&
+            typeof outbound !== "string" &&
+            outbound.image !== undefined &&
+            this.pendingAnimal !== null
+          ) {
+            ledger.setDayAnimalImage(this.currentDayId, this.pendingAnimal.id);
           }
         }
         break;

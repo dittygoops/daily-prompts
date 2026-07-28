@@ -20,5 +20,10 @@
     "dayOfWeek": 0,
     "pollMinutes": 15,
     "model": "anthropic/claude-sonnet-4.5"
+  },
+  "personality": {
+    "intensity": "playful",
+    "animalImage": true,
+    "animalTimeoutMs": 10000
   }
 }

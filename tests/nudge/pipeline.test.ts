@@ -80,4 +80,30 @@ describe("checkAndSendNudges", () => {
     await checkAndSendNudges(baseDeps(ledger, channel, now));
     expect(channel.sentTo("a").some((t) => t.includes("closes soon"))).toBe(true);
   });
+
+  test("intensity 'playful' attaches the 'gentle' effect to a nudge", async () => {
+    const ledger = Ledger.open(":memory:");
+    const dispatchedAt = new Date("2026-07-20T15:30:00.000Z");
+    ledger.createDay("2026-07-20", "p1", "x", dispatchedAt.toISOString());
+    const channel = new FakeChannel();
+    const now = new Date(dispatchedAt.getTime() + 5 * HOUR);
+
+    await checkAndSendNudges({ ...baseDeps(ledger, channel, now), intensity: "playful" });
+    expect(channel.outboundTo("a")[0]?.effect).toBe("gentle");
+  });
+
+  // FakeChannel normalizes a bare string send to { text }, so "the outbound
+  // was a bare string" is unobservable here; effect === undefined is the
+  // strongest assertion available at this layer (see outbound.test.ts for
+  // the wire-level proof).
+  test("omitting intensity attaches no effect to a nudge", async () => {
+    const ledger = Ledger.open(":memory:");
+    const dispatchedAt = new Date("2026-07-20T15:30:00.000Z");
+    ledger.createDay("2026-07-20", "p1", "x", dispatchedAt.toISOString());
+    const channel = new FakeChannel();
+    const now = new Date(dispatchedAt.getTime() + 5 * HOUR);
+
+    await checkAndSendNudges(baseDeps(ledger, channel, now));
+    expect(channel.outboundTo("a")[0]?.effect).toBeUndefined();
+  });
 });

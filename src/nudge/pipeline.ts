@@ -2,6 +2,7 @@ import * as copy from "../engine/copy";
 import type { Channel } from "../channel/types";
 import type { PersonId } from "../config";
 import type { Ledger } from "../ledger/ledger";
+import { effectFor, type EffectIntensity } from "../engine/effects";
 import { nextDispatchAt, type DispatchTime } from "../scheduler";
 import { checkNudges, type NudgeTrigger } from "./checker";
 
@@ -15,6 +16,8 @@ export interface NudgePipelineDeps {
   beforeDueHours: number;
   log: (msg: string) => void;
   now?: () => Date;
+  /** Omit for no effect, which is what tests and an unconfigured deployment do. */
+  intensity?: EffectIntensity;
 }
 
 function messageFor(trigger: NudgeTrigger, person: PersonId, names: Record<PersonId, string>): string {
@@ -55,7 +58,12 @@ export async function checkAndSendNudges(deps: NudgePipelineDeps): Promise<{ sen
   });
 
   for (const { person, trigger } of toSend) {
-    await deps.channel.send(person, messageFor(trigger, person, deps.names));
+    const text = messageFor(trigger, person, deps.names);
+    const fx = effectFor("nudge", deps.intensity ?? "off");
+    // No animal image ever rides a nudge: a nudge is already the mildly
+    // awkward message in the product, and attaching a cat to "you have not
+    // answered yet" is the reading the effect policy exists to avoid.
+    await deps.channel.send(person, fx ? { text, effect: fx } : text);
     deps.ledger.recordNudgeSent(day.id, person, trigger, now.toISOString());
     deps.log(`nudge sent: day ${day.id} person ${person} trigger ${trigger}`);
   }

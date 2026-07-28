@@ -3,6 +3,7 @@ import { loadConfigFile } from "./src/config";
 import { Ledger } from "./src/ledger/ledger";
 import { SpectrumChannel } from "./src/channel/spectrum";
 import { EngineRuntime } from "./src/engine/runtime";
+import { HttpAnimalImageSource } from "./src/media/animals";
 import { StaticBankPromptSource } from "./src/prompts/staticBank";
 import { AdaptivePromptSource } from "./src/prompts/adaptive";
 import { FallbackPromptSource } from "./src/prompts/fallback";
@@ -53,6 +54,8 @@ const runtime = new EngineRuntime({
   promptSource,
   settleWindowSeconds: config.settleWindowSeconds,
   log,
+  personality: config.personality,
+  animals: new HttpAnimalImageSource(),
 });
 
 channel.start();
@@ -161,6 +164,7 @@ async function runNudgeCheck(): Promise<void> {
       afterHours: config.nudge.afterHours,
       beforeDueHours: config.nudge.beforeDueHours,
       log,
+      intensity: config.personality.intensity,
     });
     if (result.sent > 0) log(`nudge check: ${result.sent} sent`);
   } catch (err) {
@@ -198,6 +202,7 @@ async function runRecapCheck(): Promise<void> {
       dayOfWeek: config.weeklyRecap.dayOfWeek,
       timezone: config.timezone,
       log,
+      intensity: config.personality.intensity,
     });
     if (result.sent) log(`weekly recap sent`);
   } catch (err) {

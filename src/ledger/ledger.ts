@@ -204,6 +204,12 @@ export class Ledger {
                prompt_id = COALESCE(prompt_id, (SELECT d.prompt_id FROM days d WHERE d.id = person_days.day_id)),
                prompt_text = COALESCE(prompt_text, (SELECT d.prompt_text FROM days d WHERE d.id = person_days.day_id))
              WHERE prompt_text IS NULL OR prompt_id IS NULL`);
+    // No backfill, unlike person_days.prompt_text above: a day that predates
+    // this feature genuinely had no image attached, so null is the honest
+    // encoding rather than a value to compute.
+    if (!has("days", "animal_image_id")) {
+      db.exec("ALTER TABLE days ADD COLUMN animal_image_id TEXT");
+    }
   }
 
   static open(path: string): Ledger {
@@ -276,6 +282,23 @@ export class Ledger {
     this.db
       .query(`UPDATE days SET state = ?, resolved_at = ? WHERE id = ?`)
       .run(state, at, id);
+  }
+
+  /** Recency avoid-list for the next animal image, newest first. */
+  recentAnimalImageIds(limit: number): string[] {
+    const rows = this.db
+      .query<{ animal_image_id: string }, [number]>(
+        `SELECT animal_image_id FROM days WHERE animal_image_id IS NOT NULL ORDER BY id DESC LIMIT ?`,
+      )
+      .all(limit);
+    return rows.map((r) => r.animal_image_id);
+  }
+
+  /** Recorded only after an image actually went out, so the avoid-list never
+   * contains an image nobody saw. Idempotent: both persons' prompt sends
+   * write the same id for the same day. */
+  setDayAnimalImage(dayId: number, imageId: string): void {
+    this.db.query(`UPDATE days SET animal_image_id = ? WHERE id = ?`).run(imageId, dayId);
   }
 
   personDay(dayId: number, person: PersonId): PersonDayRow {

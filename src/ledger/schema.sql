@@ -6,7 +6,11 @@ CREATE TABLE IF NOT EXISTS days (
   state TEXT NOT NULL DEFAULT 'dispatched'
     CHECK (state IN ('dispatched','resolved_shared','resolved_partial','resolved_skipped','expired','failed')),
   dispatched_at TEXT,
-  resolved_at TEXT
+  resolved_at TEXT,
+  -- The animal image actually attached to this day's prompt, for recency
+  -- de-duplication only. Null means no image went out: fetch failed,
+  -- disabled, or the day predates the feature.
+  animal_image_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS person_days (

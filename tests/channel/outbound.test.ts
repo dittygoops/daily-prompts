@@ -59,6 +59,24 @@ describe("outboundContents", () => {
     expect(outboundContents({ effect: "celebrate" })).toEqual([]);
   });
 
+  test("Phase 1 shape { text, image, effect } yields two items, image first", () => {
+    const message: Outbound = {
+      text: "hi",
+      image: { bytes: Buffer.from("img"), mimeType: "image/png" },
+      effect: "emphasize",
+    };
+    const items = outboundContents(message);
+    expect(items).toHaveLength(2);
+    expect(typeof items[0]).not.toBe("string"); // the image builder
+    expect(typeof items[1]).not.toBe("string"); // text+effect, also a builder
+  });
+
+  // The real proof that intensity "off" is byte-identical on the wire: a
+  // plain string produces exactly one raw item, nothing decorated added.
+  test("outboundContents(plain string) returns exactly [\"plain text\"]", () => {
+    expect(outboundContents("plain text")).toEqual(["plain text"]);
+  });
+
   test("{ text: \"\" } still yields one item", () => {
     expect(outboundContents({ text: "" })).toEqual([""]);
   });

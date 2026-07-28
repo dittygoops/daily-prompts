@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  effectEventForKind,
   effectFor,
   type Effect,
   type EffectEvent,
   type EffectIntensity,
 } from "../src/engine/effects";
+import type { MessageKind } from "../src/ledger/ledger";
 
 const ALL_EVENTS: EffectEvent[] = [
   "daily_prompt",
@@ -109,6 +111,41 @@ describe("effectFor", () => {
       for (const event of ALL_EVENTS) {
         expect(effectFor(event, intensity)).toBe(table[intensity][event]);
       }
+    }
+  });
+});
+
+describe("effectEventForKind", () => {
+  // Exhaustive over the literal MessageKind union (src/ledger/ledger.ts), so
+  // a future kind added there and forgotten here shows up as a failure
+  // rather than silently mapping to null.
+  const ALL_KINDS: MessageKind[] = [
+    "prompt",
+    "answer_part",
+    "skip",
+    "waiting_notice",
+    "share",
+    "skip_notice",
+    "skip_ack",
+    "feedback_ask",
+    "feedback",
+    "oob_reply",
+    "oob_in",
+    "unknown_sender",
+    "send_failed",
+  ];
+
+  test("maps the three product moments", () => {
+    expect(effectEventForKind("prompt")).toBe("daily_prompt");
+    expect(effectEventForKind("share")).toBe("day_resolved_both_answered");
+    expect(effectEventForKind("skip_notice")).toBe("day_resolved_skipped");
+  });
+
+  test("every other kind is plumbing, not a moment, and returns null", () => {
+    const mapped = new Set(["prompt", "share", "skip_notice"]);
+    for (const kind of ALL_KINDS) {
+      if (mapped.has(kind)) continue;
+      expect(effectEventForKind(kind)).toBe(null);
     }
   });
 });

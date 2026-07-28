@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { loadConfig } from "../src/config";
+import type { Config } from "../src/config";
+import type { EffectIntensity } from "../src/engine/effects";
 
 const validRaw = {
   participants: {
@@ -101,5 +103,51 @@ describe("loadConfig", () => {
     const { participants, ...rest } = validRaw;
     const raw = { ...rest, participants: { a: participants.a } };
     expect(() => loadConfig(raw, validEnv)).toThrow(/participants\.b/);
+  });
+
+  describe("personality", () => {
+    // Guard against a silent feature enable: a schema default of "playful"
+    // would turn the feature on for every existing config.json (which has
+    // no personality block) the next time the process restarts, with no
+    // one having asked for it. intensity must default to "off".
+    test("defaults to off when no personality block is present", () => {
+      const config = loadConfig(validRaw, validEnv);
+      expect(config.personality.intensity).toBe("off");
+      expect(config.personality).toEqual({
+        intensity: "off",
+        animalImage: true,
+        animalTimeoutMs: 10_000,
+      });
+    });
+
+    test("honors an explicit personality block", () => {
+      const config = loadConfig(
+        { ...validRaw, personality: { intensity: "playful", animalImage: false, animalTimeoutMs: 3000 } },
+        validEnv,
+      );
+      expect(config.personality).toEqual({
+        intensity: "playful",
+        animalImage: false,
+        animalTimeoutMs: 3000,
+      });
+    });
+
+    test("rejects an invalid intensity value", () => {
+      expect(() =>
+        loadConfig({ ...validRaw, personality: { intensity: "loud" } }, validEnv),
+      ).toThrow(/config\.personality\.intensity/);
+    });
+
+    // Compile-time only: fails `bunx tsc --noEmit` if the schema's intensity
+    // enum and EffectIntensity (src/engine/effects.ts) ever drift apart. The
+    // duplication is deliberate (see src/config.ts); this is what catches it
+    // going stale.
+    test("the personality.intensity enum and EffectIntensity stay in sync (typecheck only)", () => {
+      const _forward: EffectIntensity = "playful" as Config["personality"]["intensity"];
+      const _backward: Config["personality"]["intensity"] = "playful" as EffectIntensity;
+      void _forward;
+      void _backward;
+      expect(true).toBe(true);
+    });
   });
 });

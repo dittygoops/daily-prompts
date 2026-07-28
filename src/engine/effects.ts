@@ -2,6 +2,7 @@
 // the mapping to vendor constants. Re-exported here only so callers of this
 // policy do not need a second import.
 import type { Effect } from "../channel/types";
+import type { MessageKind } from "../ledger/ledger";
 
 export type { Effect };
 
@@ -54,4 +55,28 @@ export function effectFor(event: EffectEvent, intensity: EffectIntensity): Effec
   // to the policy table above.
   if (intensity === "off") return null;
   return POLICY[intensity][event];
+}
+
+/** Translates the machine's message kind into the product moment this
+ * policy is written in terms of, so the policy stays out of the runtime and
+ * src/engine/stateMachine.ts never has to change for a new effect rule.
+ * Null for kinds that are plumbing rather than a moment: an acknowledgement,
+ * a holding message, or a reply to an out-of-band text is not an occasion
+ * for a flourish.
+ *
+ * "share" and "skip_notice" are safe proxies for their moments: in
+ * src/engine/stateMachine.ts, `kind: "share"` is emitted only inside the
+ * both-answered branch of onTerminal, and `skip_notice` only on paths that
+ * resolve the day as skipped. */
+export function effectEventForKind(kind: MessageKind): EffectEvent | null {
+  switch (kind) {
+    case "prompt":
+      return "daily_prompt";
+    case "share":
+      return "day_resolved_both_answered";
+    case "skip_notice":
+      return "day_resolved_skipped";
+    default:
+      return null;
+  }
 }

@@ -3,6 +3,7 @@ import type { Channel } from "../channel/types";
 import type { PersonId } from "../config";
 import type { Ledger } from "../ledger/ledger";
 import type { LlmClient } from "../llm/types";
+import { effectFor, type EffectIntensity } from "../engine/effects";
 import { buildWeeklyRecap } from "./recap";
 
 export interface SendRecapDeps {
@@ -13,6 +14,8 @@ export interface SendRecapDeps {
   model: string;
   log: (msg: string) => void;
   now?: () => string;
+  /** Omit for no effect, which is what tests and an unconfigured deployment do. */
+  intensity?: EffectIntensity;
 }
 
 /** Idempotent (via hasRecapFor) send of one week's recap to both people,
@@ -33,9 +36,13 @@ export async function sendWeeklyRecap(
     weekEnd,
   );
   const text = copy.weeklyRecapMessage(result.text);
+  // One shared value: both people must see identical decoration, mirroring
+  // the identical text below.
+  const fx = effectFor("weekly_recap", deps.intensity ?? "off");
+  const out = fx ? { text, effect: fx } : text;
 
-  await deps.channel.send("a", text);
-  await deps.channel.send("b", text);
+  await deps.channel.send("a", out);
+  await deps.channel.send("b", out);
 
   deps.ledger.recordRecap({
     weekStart,
