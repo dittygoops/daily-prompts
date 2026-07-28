@@ -43,11 +43,19 @@ function buildUserPrompt(ledger: Ledger, weekStart: string, weekEnd: string, nam
   const days = ledger.daysInRange(weekStart, weekEnd);
   const lines = [`Week: ${weekStart} to ${weekEnd}`];
   for (const day of days) {
-    const a = ledger.personDay(day.id, "a");
-    const b = ledger.personDay(day.id, "b");
-    lines.push(`[${day.date}] "${day.prompt_text}"`);
-    lines.push(`  ${names.a}: ${a.state === "answered" ? a.response_text : `(${a.state})`}`);
-    lines.push(`  ${names.b}: ${b.state === "answered" ? b.response_text : `(${b.state})`}`);
+    // Unquoted and labelled: the day-level text is a short shared angle, not
+    // a question anybody was asked, and quoting it invites the model to
+    // present it as one. On older days it is still the shared question, which
+    // reads correctly under this label too.
+    lines.push(`[${day.date}] shared angle: ${day.prompt_text}`);
+    for (const person of ["a", "b"] as const) {
+      const pd = ledger.personDay(day.id, person);
+      // Grouped per person so a question and its answer cannot be mispaired.
+      // prompt_text is backfilled for every row by the migration, so the
+      // fallback is belt-and-braces rather than an expected path.
+      lines.push(`  ${names[person]} was asked: ${pd.prompt_text ?? day.prompt_text}`);
+      lines.push(`  ${names[person]} said: ${pd.state === "answered" ? pd.response_text : `(${pd.state})`}`);
+    }
   }
   return lines.join("\n");
 }

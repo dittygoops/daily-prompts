@@ -58,3 +58,44 @@ describe("generateHighlight", () => {
     await expect(generateHighlight(ledger, "2026-07-13", "2026-07-19", names, client, "m")).rejects.toThrow();
   });
 });
+
+describe("per-person week layout", () => {
+  test("shows each person their own question alongside their own answer", async () => {
+    const ledger = Ledger.open(":memory:");
+    const day = ledger.createDay("2026-07-13", "p1", "looking back", "t");
+    ledger.setPersonPrompt(day.id, "a", "gen-a", "How is the guitar going?");
+    ledger.setPersonPrompt(day.id, "b", "gen-b", "How did the party go?");
+    ledger.finalizeResponse(day.id, "a", "slowly but surely", "t1");
+    ledger.finalizeResponse(day.id, "b", "it was great", "t2");
+    const { client, calls } = scriptedLlm(() => okResponse("h"));
+    await generateHighlight(ledger, "2026-07-13", "2026-07-19", names, client, "m");
+    const user = calls[0]!.user;
+    // Without pairing, two answers to two unseen questions are uninterpretable.
+    expect(user).toContain("Alex was asked: How is the guitar going?");
+    expect(user).toContain("Alex said: slowly but surely");
+    expect(user).toContain("Sam was asked: How did the party go?");
+    expect(user).toContain("Sam said: it was great");
+  });
+
+  test("labels the day's theme as context and does not quote it like a question", async () => {
+    // The old format printed the day-level text in quotes, which now invites
+    // the model to treat a 2-to-6 word label as something someone was asked.
+    const ledger = Ledger.open(":memory:");
+    ledger.createDay("2026-07-13", "p1", "looking back", "t");
+    const { client, calls } = scriptedLlm(() => okResponse("h"));
+    await generateHighlight(ledger, "2026-07-13", "2026-07-19", names, client, "m");
+    expect(calls[0]!.user).toContain("shared angle: looking back");
+    expect(calls[0]!.user).not.toContain('"looking back"');
+  });
+
+  test("a non-answer shows the state, and still shows what they were asked", async () => {
+    const ledger = Ledger.open(":memory:");
+    const day = ledger.createDay("2026-07-13", "p1", "looking back", "t");
+    ledger.setPersonPrompt(day.id, "a", "gen-a", "How is the guitar going?");
+    ledger.markSkipped(day.id, "a", "t1");
+    const { client, calls } = scriptedLlm(() => okResponse("h"));
+    await generateHighlight(ledger, "2026-07-13", "2026-07-19", names, client, "m");
+    expect(calls[0]!.user).toContain("Alex was asked: How is the guitar going?");
+    expect(calls[0]!.user).toContain("Alex said: (skipped)");
+  });
+});
