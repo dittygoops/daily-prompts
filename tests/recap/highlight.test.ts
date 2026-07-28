@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { generateHighlight } from "../../src/recap/highlight";
+import { generateHighlight, HIGHLIGHT_SYSTEM_PROMPT } from "../../src/recap/highlight";
 import { Ledger } from "../../src/ledger/ledger";
 import type { LlmClient } from "../../src/llm/types";
 
@@ -97,5 +97,53 @@ describe("per-person week layout", () => {
     await generateHighlight(ledger, "2026-07-13", "2026-07-19", names, client, "m");
     expect(calls[0]!.user).toContain("Alex was asked: How is the guitar going?");
     expect(calls[0]!.user).toContain("Alex said: (skipped)");
+  });
+});
+
+describe("different-questions instruction", () => {
+  test("frames differing questions as making an echo stronger, not as a hazard only", () => {
+    // The rewrite exists because contrast-hunting across two different
+    // questions can manufacture a difference that is an artifact of the
+    // questions rather than anything true about the couple.
+    expect(HIGHLIGHT_SYSTEM_PROMPT).toMatch(/different routes|more striking/i);
+    expect(HIGHLIGHT_SYSTEM_PROMPT).toMatch(/only say they were asked the same question when/i);
+    expect(HIGHLIGHT_SYSTEM_PROMPT).toMatch(/just follows from their two questions being different/i);
+  });
+
+  test("no example implies the two people answered one identical question", () => {
+    expect(HIGHLIGHT_SYSTEM_PROMPT).not.toContain("the comfort food question");
+  });
+});
+
+describe("voice guards added after a live dry run", () => {
+  test("bans typecasting an individual, not just the couple in aggregate", () => {
+    // A dry run produced "someone's got a knack for showing up exactly where
+    // they're not expected", aimed at one person, which the aggregate-only
+    // wording did not cover.
+    expect(HIGHLIGHT_SYSTEM_PROMPT).toMatch(/one of them as a type of person/i);
+  });
+
+  test("bans joking about something with a sting in it", () => {
+    expect(HIGHLIGHT_SYSTEM_PROMPT).toMatch(/sting|left out|overlooked/i);
+  });
+
+  test("requires complete sentences", () => {
+    expect(HIGHLIGHT_SYSTEM_PROMPT).toMatch(/complete sentences|subject and a verb/i);
+  });
+
+  test("caps topics at four and asks for neutral labels", () => {
+    expect(HIGHLIGHT_SYSTEM_PROMPT).toMatch(/between 2 and 4 items, never more/i);
+  });
+});
+
+describe("transition-week correctness", () => {
+  test("permits saying the question was shared when it genuinely was", () => {
+    // Days before per-person prompts really did ask both people the same
+    // question, and a blanket ban forbade stating a true fact about them.
+    expect(HIGHLIGHT_SYSTEM_PROMPT).toMatch(/only say they were asked the same question when/i);
+  });
+
+  test("bans em dashes in the outgoing text", () => {
+    expect(HIGHLIGHT_SYSTEM_PROMPT).toMatch(/never use an em dash/i);
   });
 });
