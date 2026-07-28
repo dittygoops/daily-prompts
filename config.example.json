@@ -24,6 +24,7 @@
   "personality": {
     "intensity": "playful",
     "animalImage": true,
+    "animalKind": "cats",
     "animalTimeoutMs": 10000
   }
 }

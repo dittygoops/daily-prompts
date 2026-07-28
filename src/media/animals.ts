@@ -80,7 +80,19 @@ const DOGCEO: AnimalProvider = {
 };
 
 /** Default provider list; exported so tests (and callers) can inject a subset. */
-export const DEFAULT_ANIMAL_PROVIDERS: AnimalProvider[] = [CATAAS, THECATAPI, DOGCEO];
+export const CAT_PROVIDERS: AnimalProvider[] = [CATAAS, THECATAPI];
+export const DOG_PROVIDERS: AnimalProvider[] = [DOGCEO];
+export const DEFAULT_ANIMAL_PROVIDERS: AnimalProvider[] = [...CAT_PROVIDERS, ...DOG_PROVIDERS];
+
+export type AnimalKind = "cats" | "dogs" | "both";
+
+/** Which sources a kind maps to. Separate from the providers themselves so
+ * config stays in product terms ("cats") rather than naming vendors. */
+export function providersFor(kind: AnimalKind): AnimalProvider[] {
+  if (kind === "cats") return CAT_PROVIDERS;
+  if (kind === "dogs") return DOG_PROVIDERS;
+  return DEFAULT_ANIMAL_PROVIDERS;
+}
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 

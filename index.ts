@@ -3,7 +3,7 @@ import { loadConfigFile } from "./src/config";
 import { Ledger } from "./src/ledger/ledger";
 import { SpectrumChannel } from "./src/channel/spectrum";
 import { EngineRuntime } from "./src/engine/runtime";
-import { HttpAnimalImageSource } from "./src/media/animals";
+import { HttpAnimalImageSource, providersFor } from "./src/media/animals";
 import { StaticBankPromptSource } from "./src/prompts/staticBank";
 import { AdaptivePromptSource } from "./src/prompts/adaptive";
 import { FallbackPromptSource } from "./src/prompts/fallback";
@@ -55,7 +55,7 @@ const runtime = new EngineRuntime({
   settleWindowSeconds: config.settleWindowSeconds,
   log,
   personality: config.personality,
-  animals: new HttpAnimalImageSource(),
+  animals: new HttpAnimalImageSource({ sources: providersFor(config.personality.animalKind) }),
 });
 
 channel.start();

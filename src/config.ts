@@ -77,6 +77,10 @@ const rawConfigSchema = z.object({
       // have different annoyance profiles if they misfire. Ignored entirely
       // when intensity is "off".
       animalImage: z.boolean().default(true),
+      // dog.ceo draws from the full breed list, which includes some
+      // distinctly odd-looking ones. Cats by default after the owner saw a
+      // dhole; "both" restores the original random mix across all sources.
+      animalKind: z.enum(["cats", "dogs", "both"]).default("cats"),
       // Hard outer wall-clock deadline for the whole animal image fetch.
       // HttpAnimalImageSource.fetch (src/media/animals.ts) makes up to 3
       // attempts, and each attempt makes two independently timed HTTP calls
@@ -88,7 +92,7 @@ const rawConfigSchema = z.object({
       // close to the full 48s. Dispatch must not stall that long.
       animalTimeoutMs: z.number().int().positive().default(10_000),
     })
-    .default({ intensity: "off", animalImage: true, animalTimeoutMs: 10_000 }),
+    .default({ intensity: "off", animalImage: true, animalKind: "cats", animalTimeoutMs: 10_000 }),
 });
 
 export interface Config {
@@ -109,7 +113,7 @@ export interface Config {
   // but zod and is depended on by nearly everything, so importing from
   // src/engine/ here would invert the dependency direction. The duplication
   // is guarded by a compile-time assertion in tests/config.test.ts.
-  personality: { intensity: "off" | "subtle" | "playful"; animalImage: boolean; animalTimeoutMs: number };
+  personality: { intensity: "off" | "subtle" | "playful"; animalImage: boolean; animalKind: "cats" | "dogs" | "both"; animalTimeoutMs: number };
   spectrum: { projectId: string; projectSecret: string };
   openrouter: { apiKey: string };
   supermemory: { apiKey: string; baseUrl: string };

@@ -116,18 +116,20 @@ describe("loadConfig", () => {
       expect(config.personality).toEqual({
         intensity: "off",
         animalImage: true,
+        animalKind: "cats",
         animalTimeoutMs: 10_000,
       });
     });
 
     test("honors an explicit personality block", () => {
       const config = loadConfig(
-        { ...validRaw, personality: { intensity: "playful", animalImage: false, animalTimeoutMs: 3000 } },
+        { ...validRaw, personality: { intensity: "playful", animalImage: false, animalKind: "both", animalTimeoutMs: 3000 } },
         validEnv,
       );
       expect(config.personality).toEqual({
         intensity: "playful",
         animalImage: false,
+        animalKind: "both",
         animalTimeoutMs: 3000,
       });
     });

@@ -3,6 +3,7 @@ import {
   DEFAULT_ANIMAL_PROVIDERS,
   FakeAnimalImageSource,
   HttpAnimalImageSource,
+  providersFor,
 } from "../../src/media/animals";
 import type { AnimalImage } from "../../src/media/animals";
 
@@ -287,5 +288,21 @@ describe("FakeAnimalImageSource", () => {
   test("error mode throws", async () => {
     const source = new FakeAnimalImageSource(undefined, new Error("boom"));
     await expect(source.fetch()).rejects.toThrow("boom");
+  });
+});
+
+describe("providersFor", () => {
+  test("cats excludes the dog source entirely", () => {
+    // dog.ceo draws from the full breed list and produced a dhole, which the
+    // owner did not love. Kind is expressed in product terms, not vendors.
+    expect(providersFor("cats").map((p) => p.name)).toEqual(["cataas", "thecatapi"]);
+  });
+
+  test("dogs excludes the cat sources", () => {
+    expect(providersFor("dogs").map((p) => p.name)).toEqual(["dogceo"]);
+  });
+
+  test("both keeps the original mix", () => {
+    expect(providersFor("both").map((p) => p.name)).toEqual(["cataas", "thecatapi", "dogceo"]);
   });
 });
