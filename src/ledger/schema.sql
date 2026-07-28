@@ -2,7 +2,13 @@ CREATE TABLE IF NOT EXISTS days (
   id INTEGER PRIMARY KEY,
   date TEXT NOT NULL UNIQUE,
   prompt_id TEXT NOT NULL,
+  -- A human-readable label for the day. Kept for back-compat and for days
+  -- that have no theme; the questions themselves live in person_days.
   prompt_text TEXT NOT NULL,
+  -- The short shared angle tying the two questions together, when the
+  -- generator produced one. Null on fallback and pre-theme days, so a reader
+  -- can tell a real theme from a question standing in for one.
+  theme TEXT,
   state TEXT NOT NULL DEFAULT 'dispatched'
     CHECK (state IN ('dispatched','resolved_shared','resolved_partial','resolved_skipped','expired','failed')),
   dispatched_at TEXT,

@@ -81,7 +81,7 @@ describe("per-person week layout", () => {
     // The old format printed the day-level text in quotes, which now invites
     // the model to treat a 2-to-6 word label as something someone was asked.
     const ledger = Ledger.open(":memory:");
-    ledger.createDay("2026-07-13", "p1", "looking back", "t");
+    ledger.createDay("2026-07-13", "p1", "looking back", "t", "looking back");
     const { client, calls } = scriptedLlm(() => okResponse("h"));
     await generateHighlight(ledger, "2026-07-13", "2026-07-19", names, client, "m");
     expect(calls[0]!.user).toContain("shared angle: looking back");
@@ -145,5 +145,18 @@ describe("transition-week correctness", () => {
 
   test("bans em dashes in the outgoing text", () => {
     expect(HIGHLIGHT_SYSTEM_PROMPT).toMatch(/never use an em dash/i);
+  });
+});
+
+describe("theme-less days", () => {
+  test("omits the shared-angle line when the day had no theme", async () => {
+    // A fallback day's label is just a question standing in. Announcing it as
+    // a shared angle is a small lie the model would build an observation on.
+    const ledger = Ledger.open(":memory:");
+    ledger.createDay("2026-07-13", "p1", "What's your favorite meal?", "t");
+    const { client, calls } = scriptedLlm(() => okResponse("h"));
+    await generateHighlight(ledger, "2026-07-13", "2026-07-19", names, client, "m");
+    expect(calls[0]!.user).not.toContain("shared angle");
+    expect(calls[0]!.user).toContain("[2026-07-13]");
   });
 });

@@ -6,7 +6,7 @@ const HOUR = 60 * 60 * 1000;
 
 function day(overrides: Partial<DayRow> = {}): DayRow {
   return {
-    id: 1, date: "2026-07-20", prompt_id: "p1", prompt_text: "x",
+    id: 1, date: "2026-07-20", prompt_id: "p1", prompt_text: "x", theme: null,
     state: "dispatched", dispatched_at: "2026-07-20T08:30:00.000Z", resolved_at: null,
     ...overrides,
   };

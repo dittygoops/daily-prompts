@@ -43,11 +43,11 @@ function buildUserPrompt(ledger: Ledger, weekStart: string, weekEnd: string, nam
   const days = ledger.daysInRange(weekStart, weekEnd);
   const lines = [`Week: ${weekStart} to ${weekEnd}`];
   for (const day of days) {
-    // Unquoted and labelled: the day-level text is a short shared angle, not
-    // a question anybody was asked, and quoting it invites the model to
-    // present it as one. On older days it is still the shared question, which
-    // reads correctly under this label too.
-    lines.push(`[${day.date}] shared angle: ${day.prompt_text}`);
+    // Only printed when the day genuinely had a theme. On fallback and
+    // pre-theme days the day-level text is just a question standing in as a
+    // label, and announcing it as a shared angle would be a small lie the
+    // model would then build an observation on.
+    lines.push(day.theme ? `[${day.date}] shared angle: ${day.theme}` : `[${day.date}]`);
     for (const person of ["a", "b"] as const) {
       const pd = ledger.personDay(day.id, person);
       // Grouped per person so a question and its answer cannot be mispaired.

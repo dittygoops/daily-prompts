@@ -33,6 +33,9 @@ export interface DayRow {
   date: string;
   prompt_id: string;
   prompt_text: string;
+  /** The shared angle tying the day's two questions together. Null when the
+   * generator produced none, so no reader mistakes a question for a theme. */
+  theme: string | null;
   state: DayState;
   dispatched_at: string | null;
   resolved_at: string | null;
@@ -192,6 +195,10 @@ export class Ledger {
     if (!has("generation_log", "person")) {
       db.exec("ALTER TABLE generation_log ADD COLUMN person TEXT");
     }
+    if (!has("days", "theme")) {
+      // No backfill: null is the honest value for days that never had one.
+      db.exec("ALTER TABLE days ADD COLUMN theme TEXT");
+    }
     if (!has("person_days", "prompt_id")) {
       db.exec("ALTER TABLE person_days ADD COLUMN prompt_id TEXT");
     }
@@ -231,13 +238,19 @@ export class Ledger {
     this.db.close();
   }
 
-  createDay(date: string, promptId: string, promptText: string, dispatchedAt: string): DayRow {
+  createDay(
+    date: string,
+    promptId: string,
+    promptText: string,
+    dispatchedAt: string,
+    theme: string | null = null,
+  ): DayRow {
     const day = this.db
-      .query<DayRow, [string, string, string, string]>(
-        `INSERT INTO days (date, prompt_id, prompt_text, state, dispatched_at)
-         VALUES (?, ?, ?, 'dispatched', ?) RETURNING *`,
+      .query<DayRow, [string, string, string, string | null, string]>(
+        `INSERT INTO days (date, prompt_id, prompt_text, theme, state, dispatched_at)
+         VALUES (?, ?, ?, ?, 'dispatched', ?) RETURNING *`,
       )
-      .get(date, promptId, promptText, dispatchedAt)!;
+      .get(date, promptId, promptText, theme, dispatchedAt)!;
     for (const person of ["a", "b"] as const) {
       // Seeded from the day's prompt so a day is never in a state where
       // somebody has no question. setPersonPrompt overwrites when the

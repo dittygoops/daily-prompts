@@ -551,3 +551,33 @@ describe("animal image recency", () => {
     }
   });
 });
+
+describe("day theme", () => {
+  test("stores the shared theme separately from the day's label", () => {
+    // prompt_text held the theme when there was one and a full question
+    // otherwise, so no reader could tell which it was looking at.
+    const day = ledger.createDay("2026-07-28", "gen-a", "How is the guitar going?", "t", "looking back");
+    expect(ledger.dayForDate("2026-07-28")!.theme).toBe("looking back");
+  });
+
+  test("theme is null when the source had none, rather than echoing a question", () => {
+    ledger.createDay("2026-07-28", "p1", "What's your favorite meal?", "t");
+    expect(ledger.dayForDate("2026-07-28")!.theme).toBeNull();
+  });
+
+  test("days predating the column read as having no theme", () => {
+    const path = join(tmpdir(), `daily-prompts-theme-${Date.now()}.db`);
+    try {
+      const old = new Database(path, { create: true, strict: true });
+      old.exec(`CREATE TABLE days (id INTEGER PRIMARY KEY, date TEXT NOT NULL UNIQUE, prompt_id TEXT NOT NULL,
+        prompt_text TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'dispatched', dispatched_at TEXT NOT NULL, resolved_at TEXT)`);
+      old.exec(`INSERT INTO days (id,date,prompt_id,prompt_text,dispatched_at) VALUES (1,'2026-07-18','p9','legacy question','t')`);
+      old.close();
+      const migrated = Ledger.open(path);
+      expect(migrated.dayForDate("2026-07-18")!.theme).toBeNull();
+      expect(migrated.dayForDate("2026-07-18")!.prompt_text).toBe("legacy question");
+    } finally {
+      for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
+    }
+  });
+});

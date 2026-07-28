@@ -195,9 +195,8 @@ export class EngineRuntime {
       case "CreateDay": {
         // days.prompt_text holds the shared theme, not a question anybody was
         // asked. The questions themselves live per person, since they differ.
-        const themeId = effect.prompts.a.id;
-        const themeText = effect.theme ?? effect.prompts.a.text;
-        const day = ledger.createDay(effect.date, themeId, themeText, effect.at);
+        const label = effect.theme ?? effect.prompts.a.text;
+        const day = ledger.createDay(effect.date, effect.prompts.a.id, label, effect.at, effect.theme);
         for (const person of ["a", "b"] as const) {
           const p = effect.prompts[person];
           ledger.setPersonPrompt(day.id, person, p.id, p.text);
