@@ -474,3 +474,27 @@ describe("feedback", () => {
     expect(fb[0]?.person).toBe("a");
   });
 });
+
+describe("per-person prompt history for novelty", () => {
+  test("returns only that person's own prior questions, oldest first", () => {
+    for (const [date, aq, bq] of [
+      ["2026-07-18", "a-one", "b-one"],
+      ["2026-07-19", "a-two", "b-two"],
+      ["2026-07-20", "a-three", "b-three"],
+    ] as const) {
+      const day = ledger.createDay(date, "theme", "theme text", "t");
+      ledger.setPersonPrompt(day.id, "a", `g-${date}-a`, aq);
+      ledger.setPersonPrompt(day.id, "b", `g-${date}-b`, bq);
+    }
+    // Comparing a question against the day-level theme, or against the
+    // partner's question, measures the wrong thing entirely.
+    expect(ledger.personPromptsBefore("2026-07-20", "a")).toEqual(["a-one", "a-two"]);
+    expect(ledger.personPromptsBefore("2026-07-20", "b")).toEqual(["b-one", "b-two"]);
+  });
+
+  test("excludes the date itself, so a prompt never compares against itself", () => {
+    const day = ledger.createDay("2026-07-18", "t", "t", "t");
+    ledger.setPersonPrompt(day.id, "a", "g", "only question");
+    expect(ledger.personPromptsBefore("2026-07-18", "a")).toEqual([]);
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { NEAR_DUPLICATE_THRESHOLD, contentWords, findExactDuplicates, nearestPrior, openingStem, repeatedStems } from "../../src/eval/novelty";
+import { NEAR_DUPLICATE_THRESHOLD, contentWords, findExactDuplicates, nearestPrior, openingStem, repeatedStems, sameDayStemCollisions } from "../../src/eval/novelty";
 
 describe("findExactDuplicates", () => {
   test("returns an empty array when every prompt text is unique", () => {
@@ -136,5 +136,35 @@ describe("repeatedStems", () => {
 
   test("a stem used only once is not a repetition", () => {
     expect(repeatedStems(["What's one thing you love?", "Best meal this month?"])).toEqual([]);
+  });
+});
+
+describe("sameDayStemCollisions", () => {
+  test("flags two people given the same sentence frame on the same day", () => {
+    // generationPrompt.ts explicitly forbids giving both people the same
+    // frame today, and pooling all prompts into repeatedStems cannot see it:
+    // a cross-person collision looks identical to a reuse across weeks.
+    const collisions = sameDayStemCollisions([
+      { date: "2026-07-28", person: "a", text: "What's one thing you're proud of this week?" },
+      { date: "2026-07-28", person: "b", text: "What's one thing you're avoiding this week?" },
+    ]);
+    expect(collisions).toHaveLength(1);
+    expect(collisions[0]!.date).toBe("2026-07-28");
+  });
+
+  test("does not flag the same frame reused on different days", () => {
+    const collisions = sameDayStemCollisions([
+      { date: "2026-07-27", person: "a", text: "What's one thing you're proud of?" },
+      { date: "2026-07-28", person: "b", text: "What's one thing you're avoiding?" },
+    ]);
+    expect(collisions).toEqual([]);
+  });
+
+  test("does not flag two genuinely different shapes on the same day", () => {
+    const collisions = sameDayStemCollisions([
+      { date: "2026-07-28", person: "a", text: "What's one thing you're proud of?" },
+      { date: "2026-07-28", person: "b", text: "When did you last surprise yourself?" },
+    ]);
+    expect(collisions).toEqual([]);
   });
 });

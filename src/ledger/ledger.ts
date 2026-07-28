@@ -544,6 +544,24 @@ export class Ledger {
     return rows.map(toGenerationLogRow);
   }
 
+  /** Every question THIS person was asked before `date`, oldest first.
+   * Novelty has to be measured within one person's own history: comparing a
+   * question against the day-level theme, or against the partner's question,
+   * measures the wrong thing. Not window-limited, because a repeat from
+   * outside the generator's context window is still a repeat to the person
+   * receiving it. */
+  personPromptsBefore(date: string, person: PersonId): string[] {
+    const rows = this.db
+      .query<{ prompt_text: string | null }, [PersonId, string]>(
+        `SELECT pd.prompt_text FROM person_days pd
+         JOIN days d ON d.id = pd.day_id
+         WHERE pd.person = ? AND d.date < ?
+         ORDER BY d.date`,
+      )
+      .all(person, date);
+    return rows.map((r) => r.prompt_text).filter((t): t is string => t !== null && t.length > 0);
+  }
+
   /** Generated prompts still awaiting a quality score, oldest first.
    * Fallback rows are excluded: those came from the static bank, which has
    * its own scored baseline in docs/eval-baseline-static-bank.md. */

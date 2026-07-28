@@ -134,3 +134,48 @@ export function nearestPrior(
   }
   return best;
 }
+
+export interface DatedPrompt {
+  date: string;
+  person: string;
+  text: string;
+}
+
+export interface StemCollision {
+  date: string;
+  stem: string;
+  prompts: DatedPrompt[];
+}
+
+/** Two people handed the same sentence frame on the SAME day.
+ * repeatedStems pools every prompt together, so it cannot tell a
+ * cross-person collision from an ordinary reuse weeks apart. The generator is
+ * explicitly told not to give both people the same frame today, so this is
+ * the check that can actually catch it. */
+export function sameDayStemCollisions(prompts: DatedPrompt[], stemWords?: number): StemCollision[] {
+  const byDate = new Map<string, DatedPrompt[]>();
+  for (const p of prompts) {
+    const list = byDate.get(p.date) ?? [];
+    list.push(p);
+    byDate.set(p.date, list);
+  }
+
+  const collisions: StemCollision[] = [];
+  for (const [date, sameDay] of byDate) {
+    const byStem = new Map<string, DatedPrompt[]>();
+    for (const p of sameDay) {
+      const stem = openingStem(p.text, stemWords);
+      const list = byStem.get(stem) ?? [];
+      list.push(p);
+      byStem.set(stem, list);
+    }
+    for (const [stem, group] of byStem) {
+      // More than one PERSON, not merely more than one row: a retry could
+      // legitimately write two rows for the same person and day.
+      if (new Set(group.map((p) => p.person)).size > 1) {
+        collisions.push({ date, stem, prompts: group });
+      }
+    }
+  }
+  return collisions.sort((x, y) => x.date.localeCompare(y.date));
+}

@@ -6,6 +6,7 @@
 import bank from "../data/prompts.json";
 import { loadConfigFile } from "../src/config";
 import { judgePrompt, passesAll, type Judgment } from "../src/eval/judge";
+import { AXES } from "../src/eval/rubric";
 import { findExactDuplicates } from "../src/eval/novelty";
 import { OpenRouterClient } from "../src/llm/openrouter";
 
@@ -48,12 +49,7 @@ if (failing.length > 0) {
   lines.push("");
   for (const r of failing) {
     lines.push(`### \`${r.id}\`: "${r.text}"`);
-    for (const [axis, reasonKey] of [
-      ["answerable", "answerableReason"],
-      ["singleQuestion", "singleQuestionReason"],
-      ["appropriateLength", "appropriateLengthReason"],
-      ["emotionallySafe", "emotionallySafeReason"],
-    ] as const) {
+    for (const [axis, reasonKey] of AXES) {
       const pass = r.judgment[axis];
       if (!pass) lines.push(`- **${axis}**: FAIL — ${r.judgment[reasonKey]}`);
     }

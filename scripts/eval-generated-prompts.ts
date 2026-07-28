@@ -8,7 +8,8 @@
 // docs/eval-baseline-static-bank.md.
 import { loadConfigFile } from "../src/config";
 import { judgePrompt, passesAll, type Judgment } from "../src/eval/judge";
-import { NEAR_DUPLICATE_THRESHOLD, nearestPrior, repeatedStems, type NearestPriorMatch } from "../src/eval/novelty";
+import { AXES } from "../src/eval/rubric";
+import { NEAR_DUPLICATE_THRESHOLD, nearestPrior, repeatedStems, sameDayStemCollisions, type NearestPriorMatch } from "../src/eval/novelty";
 import { Ledger } from "../src/ledger/ledger";
 import { OpenRouterClient } from "../src/llm/openrouter";
 
@@ -27,6 +28,7 @@ const fellBack = rows.filter((r) => r.fellBack);
 
 interface Scored {
   date: string;
+  person: string;
   text: string;
   rationale: string | null;
   stance: string | null;
@@ -37,12 +39,16 @@ interface Scored {
 
 const scored: Scored[] = [];
 for (const row of generated) {
-  // Priors are every prompt dispatched before this date, not just the
-  // window the generator was shown: repeating a prompt from outside its
-  // context window is still a repeat to the people receiving it.
-  const priors = ledger.recentDays(row.date, 10_000).map((d) => d.prompt_text);
+  // Priors are that PERSON's own prior questions, not the day-level text.
+  // The day row now holds a shared theme, and comparing a question against a
+  // theme label (or against the partner's question) measures the wrong thing.
+  // Not window-limited: a repeat from outside the generator's context window
+  // is still a repeat to the person receiving it.
+  const person = row.person ?? "a";
+  const priors = ledger.personPromptsBefore(row.date, person as "a" | "b");
   scored.push({
     date: row.date,
+    person: row.person ?? "(shared)",
     text: row.promptText!,
     rationale: row.rationale,
     stance: row.stance,
@@ -56,12 +62,6 @@ const failing = scored.filter((s) => !passesAll(s.judgment));
 const passCount = scored.length - failing.length;
 const nearDupes = scored.filter((s) => s.novelty?.isNearDuplicate);
 
-const AXES = [
-  ["answerable", "answerableReason"],
-  ["singleQuestion", "singleQuestionReason"],
-  ["appropriateLength", "appropriateLengthReason"],
-  ["emotionallySafe", "emotionallySafeReason"],
-] as const;
 
 const axisFailures = Object.fromEntries(
   AXES.map(([axis]) => [axis, scored.filter((s) => !s.judgment[axis]).length]),
@@ -107,7 +107,12 @@ lines.push(`## Aggregate`);
 lines.push("");
 lines.push(`### Fallback rate`);
 lines.push("");
-lines.push(`${fellBack.length}/${rows.length} (${pct(fellBack.length, rows.length)}) of generation attempts fell back to the static bank.`);
+// Counted over distinct dates, not rows: a generated day writes one row per
+// person while a fallback day writes one row total, so a row-based rate
+// understates fallbacks by up to half.
+const allDates = new Set(rows.map((r) => r.date));
+const fellBackDates = new Set(fellBack.map((r) => r.date));
+lines.push(`${fellBackDates.size}/${allDates.size} (${pct(fellBackDates.size, allDates.size)}) of days fell back to the static bank.`);
 if (fellBack.length > 0) {
   lines.push("");
   for (const f of fellBack) lines.push(`- \`${f.date}\`: ${f.fallbackReason ?? "(no reason recorded)"}`);
@@ -133,12 +138,12 @@ lines.push("");
 if (scored.length === 0) {
   lines.push(`No generated prompts to check.`);
 } else {
-  lines.push(`| date | prompt | closest prior prompt | similarity | near-dup |`);
-  lines.push(`|---|---|---|---|---|`);
+  lines.push(`| date | person | prompt | closest prior (theirs) | similarity | near-dup |`);
+  lines.push(`|---|---|---|---|---|---|`);
   for (const s of scored) {
     const n = s.novelty;
     lines.push(
-      `| ${s.date} | ${s.text} | ${n ? n.text : "(no prior history)"} | ${n ? n.similarity.toFixed(2) : "n/a"} | ${n ? mark(!n.isNearDuplicate) : "✅"} |`,
+      `| ${s.date} | ${s.person} | ${s.text} | ${n ? n.text : "(no prior history)"} | ${n ? n.similarity.toFixed(2) : "n/a"} | ${n ? mark(!n.isNearDuplicate) : "✅"} |`,
     );
   }
 }
@@ -150,6 +155,19 @@ lines.push(
   `Content-word overlap is blind to shared scaffolding, so opening templates are checked separately: two prompts can score near zero on Jaccard while being built from the identical sentence frame.`,
 );
 lines.push("");
+const collisions = sameDayStemCollisions(
+  scored.map((s) => ({ date: s.date, person: s.person, text: s.text })),
+);
+if (collisions.length === 0) {
+  lines.push(`No day gave both people the same opening frame.`);
+} else {
+  for (const c of collisions) {
+    lines.push(`- \`${c.date}\` gave both people the frame \`${c.stem}...\`:`);
+    for (const p of c.prompts) lines.push(`  - (${p.person}) "${p.text}"`);
+  }
+}
+lines.push("");
+
 const stems = repeatedStems(scored.map((s) => s.text));
 if (stems.length === 0) {
   lines.push(`No opening template is reused across the generated prompts.`);

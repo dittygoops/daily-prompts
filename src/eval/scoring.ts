@@ -1,6 +1,7 @@
 import type { Ledger } from "../ledger/ledger";
 import type { LlmClient } from "../llm/types";
 import { judgePrompt, passesAll, type Judgment } from "./judge";
+import { AXES } from "./rubric";
 
 export interface ScoringDeps {
   ledger: Ledger;
@@ -15,12 +16,6 @@ export interface ScoringResult {
   failed: number;
 }
 
-const AXES = [
-  ["answerable", "answerableReason"],
-  ["singleQuestion", "singleQuestionReason"],
-  ["appropriateLength", "appropriateLengthReason"],
-  ["emotionallySafe", "emotionallySafeReason"],
-] as const;
 
 /** Only the failing axes are kept: a passing row's reasons are noise, and
  * the interesting question later is always why something failed. */

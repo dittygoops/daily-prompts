@@ -17,3 +17,15 @@ Respond with strict JSON only, no prose, in exactly this shape:
 export function buildJudgeUserPrompt(promptText: string): string {
   return `Question to grade: "${promptText}"`;
 }
+
+/** The rubric axes and their reason fields, in report order. Shared because
+ * this list was previously duplicated in three places (the scorer and both
+ * eval scripts) with nothing to catch a divergence. */
+export const AXES = [
+  ["answerable", "answerableReason"],
+  ["singleQuestion", "singleQuestionReason"],
+  ["appropriateLength", "appropriateLengthReason"],
+  ["emotionallySafe", "emotionallySafeReason"],
+] as const;
+
+export type Axis = (typeof AXES)[number][0];
