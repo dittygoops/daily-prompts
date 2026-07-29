@@ -214,3 +214,20 @@ describe("buildGenerationUserPrompt", () => {
     expect(user.length).toBeGreaterThan(0);
   });
 });
+
+describe("question shape", () => {
+  test("requires every question to carry its own subject", () => {
+    // Live pair, same theme, same day: one person was asked "what's an area
+    // of growth you're interested in" (he supplies the subject) while the
+    // other got "how is your reading going" (subject named, she reports).
+    const sys = ADAPTIVE_SYSTEM_PROMPT.toLowerCase();
+    expect(sys).toMatch(/must carry its own subject/);
+    expect(sys).toMatch(/nominate a category/);
+  });
+
+  test("forbids abstracting upward when a subject is used up", () => {
+    const sys = ADAPTIVE_SYSTEM_PROMPT.toLowerCase();
+    expect(sys).toMatch(/change subject/);
+    expect(sys).toMatch(/vaguer version/);
+  });
+});
