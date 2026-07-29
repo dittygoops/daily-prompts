@@ -8,7 +8,7 @@ import { recentFeedbackByPerson } from "./feedback";
 import { ADAPTIVE_SYSTEM_PROMPT, buildGenerationUserPrompt } from "./generationPrompt";
 import { recentPromptHistory } from "./history";
 import { decideStance, stanceForPerson, type Stance } from "./stance";
-import { NEAR_DUPLICATE_THRESHOLD, nearestPrior } from "../eval/novelty";
+import { NEAR_DUPLICATE_THRESHOLD, nearestPrior, openingStem } from "../eval/novelty";
 import type { DailyPrompts, PromptSource } from "./types";
 
 export interface AdaptivePromptSourceOptions {
@@ -24,6 +24,10 @@ const personSchema = z.object({
   // Required, not optional: forcing the generator to commit to a stance is
   // the mechanism that makes the explore/exploit ratio measurable at all.
   stance: z.enum(["explore", "exploit"]),
+  // Declared so a topical repeat can be rejected in code. Content-word
+  // similarity cannot see that "get better at" and "area of growth" are the
+  // same subject, and four such questions went out in six days.
+  topic: z.string().min(1).max(60),
 });
 
 const responseSchema = z.object({
@@ -34,7 +38,18 @@ const responseSchema = z.object({
   usedIdeaId: z.number().nullable().optional(),
 });
 
-const MAX_ATTEMPTS = 2;
+// Three rejection reasons now (near-duplicate text, repeated subject,
+// reused sentence frame), so one retry is not enough headroom.
+const MAX_ATTEMPTS = 3;
+
+/** How many of a person's recent subjects are off-limits. Six days of
+ * self-improvement questions is what this exists to prevent. */
+const TOPIC_MEMORY_DAYS = 6;
+
+/** How many recent questions the opening-frame check looks back over. */
+const STEM_MEMORY_DAYS = 3;
+
+const norm = (t: string) => t.trim().toLowerCase();
 
 /** Generates the day's two prompts, one per person, from one LLM call over
  * both people's memory context, coverage, recent history, and
@@ -72,6 +87,10 @@ export class AdaptivePromptSource implements PromptSource {
     const stanceA: Stance = stanceForPerson(dayStance, contextA.threads.length > 0);
     const stanceB: Stance = stanceForPerson(dayStance, contextB.threads.length > 0);
 
+    const recentThemes = this.ledger.recentThemes(TOPIC_MEMORY_DAYS);
+    const recentTopicsA = this.ledger.recentTopics("a", TOPIC_MEMORY_DAYS);
+    const recentTopicsB = this.ledger.recentTopics("b", TOPIC_MEMORY_DAYS);
+
     const userPrompt = buildGenerationUserPrompt({
       today: date,
       stanceA,
@@ -86,6 +105,9 @@ export class AdaptivePromptSource implements PromptSource {
       feedbackB: feedback.b,
       ideasA,
       ideasB,
+      recentTopicsA,
+      recentTopicsB,
+      recentThemes,
     });
 
     let lastError: Error | null = null;
@@ -124,6 +146,52 @@ export class AdaptivePromptSource implements PromptSource {
         continue;
       }
 
+      // Subject repeat. Jaccard is blind to this: four self-improvement
+      // questions went out in six days sharing almost no vocabulary.
+      const repeatedTopic =
+        (recentTopicsA.some((t) => norm(t) === norm(shaped.data.a.topic)) && { person: "A", topic: shaped.data.a.topic }) ||
+        (recentTopicsB.some((t) => norm(t) === norm(shaped.data.b.topic)) && { person: "B", topic: shaped.data.b.topic });
+      if (repeatedTopic && attempt < MAX_ATTEMPTS) {
+        lastError = new Error(
+          `AdaptivePromptSource: person ${repeatedTopic.person}'s topic "${repeatedTopic.topic}" was used in the last ${TOPIC_MEMORY_DAYS} questions`,
+        );
+        continue;
+      }
+
+      // Repeated shared angle. The per-person topic tags can all differ
+      // while the day is about the same thing three days running, so the
+      // repetition moves up a level into the theme.
+      const themeText = shaped.data.theme ?? null;
+      const nearestTheme = themeText ? nearestPrior(themeText, recentThemes) : null;
+      if (nearestTheme && nearestTheme.similarity >= NEAR_DUPLICATE_THRESHOLD && attempt < MAX_ATTEMPTS) {
+        lastError = new Error(
+          `AdaptivePromptSource: theme "${themeText}" repeats "${nearestTheme.text}" (${nearestTheme.similarity.toFixed(2)})`,
+        );
+        continue;
+      }
+
+      // Reused sentence frame. openingStem exists precisely because
+      // content-word overlap cannot see shared scaffolding, but until now it
+      // only ran in the offline report, never at generation time. Eight of
+      // nine live questions opened "What's a/an/one...".
+      // Wrapped, not passed by reference: map supplies the index as the
+      // second argument, which openingStem reads as stemWords, so
+      // .map(openingStem) silently makes the first stem empty.
+      const recentStemsA = priorTextsA.slice(0, STEM_MEMORY_DAYS).map((t) => openingStem(t));
+      const recentStemsB = priorTextsB.slice(0, STEM_MEMORY_DAYS).map((t) => openingStem(t));
+      const stemA = openingStem(shaped.data.a.prompt);
+      const stemB = openingStem(shaped.data.b.prompt);
+      const reusedFrame =
+        (recentStemsA.includes(stemA) && { person: "A", stem: stemA }) ||
+        (recentStemsB.includes(stemB) && { person: "B", stem: stemB }) ||
+        (stemA === stemB && { person: "both", stem: stemA });
+      if (reusedFrame && attempt < MAX_ATTEMPTS) {
+        lastError = new Error(
+          `AdaptivePromptSource: person ${reusedFrame.person} reused the opening frame "${reusedFrame.stem}..."`,
+        );
+        continue;
+      }
+
       const at = new Date().toISOString();
       const theme = shaped.data.theme ?? null;
       this.ledger.recordGeneration({
@@ -135,7 +203,8 @@ export class AdaptivePromptSource implements PromptSource {
         userPrompt,
         rawResponse: raw,
         rationale: shaped.data.rationale,
-        stance: stanceA, // the assigned stance, which is the ground truth of what was asked for
+        stance: stanceA,
+        topic: shaped.data.a.topic,
         person: "a",
         fellBack: false,
         fallbackReason: null,
@@ -150,7 +219,8 @@ export class AdaptivePromptSource implements PromptSource {
         userPrompt,
         rawResponse: raw,
         rationale: shaped.data.rationale,
-        stance: stanceB, // the assigned stance, which is the ground truth of what was asked for
+        stance: stanceB,
+        topic: shaped.data.b.topic,
         person: "b",
         fellBack: false,
         fallbackReason: null,

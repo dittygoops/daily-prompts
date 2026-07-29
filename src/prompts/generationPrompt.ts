@@ -19,6 +19,7 @@ Rules:
   - EXPLOIT means that person's question must name or directly build on something specific from THEIR OWN threads, interests, or facts below, so that it would make no sense asked of anybody else. "What are you looking forward to this week?" is NOT an exploit even when they have plans in their threads; "How did the psychic reading party end up going?" is. Pick the single most alive item in that person's own context and ask about that thing by name.
   - EXPLORE means opening a topic that person's coverage list does not touch yet.
   - Do not exploit a thread that a question in that person's recent history already asked about. Once a thread has had its day, move to a different one; a second question about the same event reads as not having listened to the answer.
+- Declare each question's subject in that person's "topic" as one short kebab-case tag naming what the question is ABOUT, not its shape: "childhood-food", "commuting", "old-friendships". Their recently used topics are listed below and are rejected automatically, so a repeat costs you the whole generation and you will simply be asked again. Self-improvement, goals, learning, growth, and "getting better at" things are ONE subject, not several: four of those went out in six days because each looked new on its own.
 - Vary your sentence structure. Do not reuse the opening frame of any recent question below (for instance, following "What's one thing you're..." with another "What's one thing you're..."), even when the subject is different, and do not give both people the same sentence frame today. Reach for different shapes: a "when" question, a "would you rather", a concrete "last time you..." and so on.
 - Respect each person's standing taste feedback (e.g. "too long", "loved this kind") as a constraint on their question.
 - If an unconsumed prompt idea below is a good fit for today, prefer using it (adapted to the question format if needed, in the question for whichever person it suits) and cite its id in "usedIdeaId"; otherwise leave "usedIdeaId" null. Never force in a bad-fit idea just because one exists.
@@ -26,7 +27,7 @@ Rules:
 - Every context line is prefixed with the date it was recorded, and today's date is given below. Read threads and moods against that gap: a thread from a few days ago is probably still live, one from weeks ago may well be resolved, and a plan for a date that has now passed has already happened. Ask about a stale item in the past tense ("how did X go?") rather than as though it is still ahead of them, and never treat an old mood as how someone feels today.
 
 Respond with strict JSON only, no prose, in exactly this shape:
-{"theme":"short shared label, 2 to 6 words","a":{"prompt":"the question for person A","stance":"explore"},"b":{"prompt":"the question for person B","stance":"exploit"},"rationale":"one sentence: what you drew on for each person, and how the two connect","usedIdeaId":null}`;
+{"theme":"short shared label, 2 to 6 words","a":{"prompt":"the question for person A","stance":"explore","topic":"kebab-case-subject"},"b":{"prompt":"the question for person B","stance":"exploit","topic":"kebab-case-subject"},"rationale":"one sentence: what you drew on for each person, and how the two connect","usedIdeaId":null}`;
 
 export interface GenerationInput {
   /** The date the prompt is for, so dated context lines can be aged. */
@@ -44,6 +45,9 @@ export interface GenerationInput {
   feedbackB: string[];
   ideasA: { id: number; text: string }[];
   ideasB: { id: number; text: string }[];
+  recentTopicsA: string[];
+  recentTopicsB: string[];
+  recentThemes: string[];
 }
 
 function historyLines(letter: "A" | "B", name: string, history: PromptHistoryEntry[]): string[] {
@@ -69,6 +73,7 @@ function personSection(
   ideas: { id: number; text: string }[],
   stance: Stance,
   history: PromptHistoryEntry[],
+  recentTopics: string[],
 ): string {
   const lines = [`PERSON ${letter}: ${name}`];
   lines.push(`  ASSIGNED STANCE FOR ${name.toUpperCase()}: ${stance.toUpperCase()}`);
@@ -80,6 +85,11 @@ function personSection(
   lines.push(`  Topics already covered: ${coverage.length > 0 ? coverage.join(", ") : "(none yet, everything is unexplored)"}`);
   lines.push(`  Recent raw feedback: ${feedback.length > 0 ? feedback.join("; ") : "(none)"}`);
   lines.push(
+    `  Topics of their recent questions (DO NOT REPEAT, these are rejected automatically): ${
+      recentTopics.length > 0 ? recentTopics.join(", ") : "(none yet)"
+    }`,
+  );
+  lines.push(
     `  Unconsumed prompt ideas they suggested: ${
       ideas.length > 0 ? ideas.map((i) => `[id ${i.id}] ${i.text}`).join("; ") : "(none)"
     }`,
@@ -90,6 +100,12 @@ function personSection(
 
 export function buildGenerationUserPrompt(input: GenerationInput): string {
   const lines: string[] = [];
+  lines.push(
+    `Recent shared angles (DO NOT land on any of these again, they are rejected automatically): ${
+      input.recentThemes.length > 0 ? input.recentThemes.join(" | ") : "(none yet)"
+    }`,
+  );
+  lines.push("");
   lines.push(`Today is ${input.today}. Every dated line below was recorded on the date shown.`);
   lines.push("");
   lines.push(
@@ -97,11 +113,11 @@ export function buildGenerationUserPrompt(input: GenerationInput): string {
   );
   lines.push("");
   lines.push(
-    personSection("A", input.names.a, input.contextA, input.coverageA, input.feedbackA, input.ideasA, input.stanceA, input.history),
+    personSection("A", input.names.a, input.contextA, input.coverageA, input.feedbackA, input.ideasA, input.stanceA, input.history, input.recentTopicsA),
   );
   lines.push("");
   lines.push(
-    personSection("B", input.names.b, input.contextB, input.coverageB, input.feedbackB, input.ideasB, input.stanceB, input.history),
+    personSection("B", input.names.b, input.contextB, input.coverageB, input.feedbackB, input.ideasB, input.stanceB, input.history, input.recentTopicsB),
   );
   return lines.join("\n");
 }

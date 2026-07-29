@@ -26,6 +26,9 @@ const baseInput = {
   feedbackB: [] as string[],
   ideasA: [] as { id: number; text: string }[],
   ideasB: [] as { id: number; text: string }[],
+  recentTopicsA: [] as string[],
+  recentTopicsB: [] as string[],
+  recentThemes: [] as string[],
 };
 
 describe("ADAPTIVE_SYSTEM_PROMPT", () => {

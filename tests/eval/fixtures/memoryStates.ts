@@ -51,6 +51,9 @@ const base = (over: Partial<GenerationInput>): GenerationInput => ({
   feedbackB: [],
   ideasA: [],
   ideasB: [],
+  recentTopicsA: [],
+  recentTopicsB: [],
+  recentThemes: [],
   ...over,
 });
 

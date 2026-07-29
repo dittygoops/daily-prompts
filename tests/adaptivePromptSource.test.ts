@@ -23,12 +23,20 @@ function okResponse(opts: {
   usedIdeaId?: number | null;
   stanceA?: string;
   stanceB?: string;
+  topicA?: string;
+  topicB?: string;
 }) {
-  const { a, b, theme = "shared theme", usedIdeaId = null, stanceA = "explore", stanceB = "explore" } = opts;
+  const {
+    a, b, theme = "shared theme", usedIdeaId = null,
+    stanceA = "explore", stanceB = "explore",
+    // Distinct by default so the topic-repeat guard does not fire on
+    // fixtures that are not about topic repetition.
+    topicA = "topic-a", topicB = "topic-b",
+  } = opts;
   return JSON.stringify({
     theme,
-    a: { prompt: a, stance: stanceA },
-    b: { prompt: b, stance: stanceB },
+    a: { prompt: a, stance: stanceA, topic: topicA },
+    b: { prompt: b, stance: stanceB, topic: topicB },
     rationale: "test rationale",
     usedIdeaId,
   });
@@ -114,7 +122,7 @@ describe("AdaptivePromptSource", () => {
       JSON.stringify({
         theme: "t",
         a: { prompt: "What's a small win from today?" },
-        b: { prompt: "What's a small win you saw?", stance: "explore" },
+        b: { prompt: "What's a small win you saw?", stance: "explore", topic: "t-b" },
         rationale: "r",
         usedIdeaId: null,
       }),
@@ -302,5 +310,85 @@ describe("AdaptivePromptSource", () => {
     const { client } = scriptedLlm(() => okResponse({ a: "some prompt", b: "another prompt", usedIdeaId: 9999 }));
     const source = makeSource(ledger, memory, client);
     await expect(source.nextPrompts("2026-07-20")).resolves.toBeDefined();
+  });
+});
+
+describe("repetition guards", () => {
+  test("retries when a person's topic repeats one of their recent subjects", async () => {
+    // The live failure: four self-improvement questions in six days, each
+    // sharing almost no vocabulary with the last, so Jaccard saw nothing.
+    const ledger = Ledger.open(":memory:");
+    ledger.recordGeneration({
+      date: "2026-07-19", promptId: "g", promptText: "q", model: "m", systemPrompt: "s",
+      userPrompt: "u", rawResponse: "{}", rationale: "r", stance: "explore",
+      person: "a", topic: "self-improvement", fellBack: false, fallbackReason: null, at: "t",
+    });
+    const memory = new FakeMemory();
+    let call = 0;
+    const { client } = scriptedLlm(() => {
+      call++;
+      return call === 1
+        ? okResponse({ a: "How are you growing lately?", b: "What did you read?", topicA: "self-improvement" })
+        : okResponse({ a: "What's the last thing you cooked?", b: "What did you read?", topicA: "cooking" });
+    });
+    const result = await makeSource(ledger, memory, client).nextPrompts("2026-07-20");
+    expect(call).toBe(2);
+    expect(result.prompts.a.text).toBe("What's the last thing you cooked?");
+    expect(ledger.generationLogFor("2026-07-20").find((r) => r.person === "a")!.topic).toBe("cooking");
+  });
+
+  test("retries when a prompt reuses the opening frame of a recent question", async () => {
+    // Eight of nine live questions opened "What's a/an/one...". openingStem
+    // existed for exactly this and only ran in the offline report.
+    const ledger = Ledger.open(":memory:");
+    const day = ledger.createDay("2026-07-19", "p1", "theme", "t");
+    ledger.setPersonPrompt(day.id, "a", "g", "What's one thing you're improving?");
+    ledger.resolveDay(day.id, "resolved_shared", "t2");
+    const memory = new FakeMemory();
+    let call = 0;
+    const { client } = scriptedLlm(() => {
+      call++;
+      return call === 1
+        ? okResponse({ a: "What's one thing you're avoiding?", b: "How was the show?" })
+        : okResponse({ a: "When did you last surprise yourself?", b: "How was the show?" });
+    });
+    const result = await makeSource(ledger, memory, client).nextPrompts("2026-07-20");
+    expect(call).toBe(2);
+    expect(result.prompts.a.text).toBe("When did you last surprise yourself?");
+  });
+
+  test("retries when both people are handed the same sentence frame today", async () => {
+    const ledger = Ledger.open(":memory:");
+    const memory = new FakeMemory();
+    let call = 0;
+    const { client } = scriptedLlm(() => {
+      call++;
+      return call === 1
+        ? okResponse({ a: "What's one thing you're proud of?", b: "What's one thing you're avoiding?" })
+        : okResponse({ a: "What's one thing you're proud of?", b: "When did you last laugh hard?" });
+    });
+    await makeSource(ledger, memory, client).nextPrompts("2026-07-20");
+    expect(call).toBe(2);
+  });
+});
+
+describe("theme repetition guard", () => {
+  test("retries when the day's shared angle repeats a recent one", async () => {
+    // Live symptom: "personal growth and improvement" followed by "personal
+    // improvement journey". Every per-person topic tag differed, so only the
+    // theme could catch it.
+    const ledger = Ledger.open(":memory:");
+    ledger.createDay("2026-07-19", "p1", "label", "t", "personal growth and improvement");
+    const memory = new FakeMemory();
+    let call = 0;
+    const { client } = scriptedLlm(() => {
+      call++;
+      return call === 1
+        ? okResponse({ a: "How are you growing?", b: "What are you learning?", theme: "personal improvement journey" })
+        : okResponse({ a: "Where did you eat last?", b: "What did you cook?", theme: "food and eating out" });
+    });
+    const result = await makeSource(ledger, memory, client).nextPrompts("2026-07-20");
+    expect(call).toBe(2);
+    expect(result.theme).toBe("food and eating out");
   });
 });

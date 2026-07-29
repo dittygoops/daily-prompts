@@ -40,6 +40,7 @@ export class FallbackPromptSource implements PromptSource {
         rationale: null,
         stance: null,
         person: null,
+        topic: null,
         fellBack: true,
         fallbackReason: reason,
         at: (this.deps.now ?? (() => new Date().toISOString()))(),

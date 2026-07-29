@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS generation_log (
   rationale TEXT,
   stance TEXT,
   person TEXT,
+  topic TEXT,
   fell_back INTEGER NOT NULL DEFAULT 0,
   fallback_reason TEXT,
   at TEXT NOT NULL

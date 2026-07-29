@@ -80,6 +80,11 @@ export interface GenerationLogEntry {
   /** Which person this prompt was generated for. Null on fallback rows,
    * where neither person got a tailored prompt. */
   person: PersonId | null;
+  /** The subject the generator declared for this question, as a short tag.
+   * Declared so repetition can be rejected deterministically: content-word
+   * similarity cannot see that "get better at" and "area of growth" are the
+   * same subject. Null on fallback and pre-topic rows. */
+  topic: string | null;
   fellBack: boolean;
   fallbackReason: string | null;
   at: string;
@@ -118,7 +123,7 @@ interface GenerationLogDbRow {
   id: number; date: string; prompt_id: string | null; prompt_text: string | null;
   model: string | null; system_prompt: string | null; user_prompt: string | null;
   raw_response: string | null; rationale: string | null; stance: string | null;
-  person: PersonId | null; fell_back: number; fallback_reason: string | null; at: string;
+  person: PersonId | null; topic: string | null; fell_back: number; fallback_reason: string | null; at: string;
 }
 
 const toGenerationLogRow = (r: GenerationLogDbRow): GenerationLogRow => ({
@@ -133,6 +138,7 @@ const toGenerationLogRow = (r: GenerationLogDbRow): GenerationLogRow => ({
   rationale: r.rationale,
   stance: r.stance,
   person: r.person,
+  topic: r.topic,
   fellBack: r.fell_back === 1,
   fallbackReason: r.fallback_reason,
   at: r.at,
@@ -194,6 +200,9 @@ export class Ledger {
     // fallback row represents a day where no per-person generation happened.
     if (!has("generation_log", "person")) {
       db.exec("ALTER TABLE generation_log ADD COLUMN person TEXT");
+    }
+    if (!has("generation_log", "topic")) {
+      db.exec("ALTER TABLE generation_log ADD COLUMN topic TEXT");
     }
     if (!has("days", "theme")) {
       // No backfill: null is the honest value for days that never had one.
@@ -543,8 +552,8 @@ export class Ledger {
     this.db
       .query(
         `INSERT INTO generation_log
-           (date, prompt_id, prompt_text, model, system_prompt, user_prompt, raw_response, rationale, stance, person, fell_back, fallback_reason, at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (date, prompt_id, prompt_text, model, system_prompt, user_prompt, raw_response, rationale, stance, person, topic, fell_back, fallback_reason, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         entry.date,
@@ -557,6 +566,7 @@ export class Ledger {
         entry.rationale,
         entry.stance,
         entry.person,
+        entry.topic,
         entry.fellBack ? 1 : 0,
         entry.fallbackReason,
         entry.at,
@@ -578,6 +588,34 @@ export class Ledger {
       .query<GenerationLogDbRow, []>(`SELECT * FROM generation_log ORDER BY date, id`)
       .all();
     return rows.map(toGenerationLogRow);
+  }
+
+  /** The shared angles of recent days, most recent first. Guarded because
+   * the per-person topic tags can all be different ("job-search-skills",
+   * "fitness-goals") while the day is about the same thing three days
+   * running: the repetition moves up a level into the theme. */
+  recentThemes(limit: number): string[] {
+    const rows = this.db
+      .query<{ theme: string | null }, [number]>(
+        `SELECT theme FROM days WHERE theme IS NOT NULL ORDER BY date DESC LIMIT ?`,
+      )
+      .all(limit);
+    return rows.map((r) => r.theme).filter((t): t is string => t !== null);
+  }
+
+  /** Subjects this person's recent questions covered, most recent first.
+   * Feeds a deterministic repeat guard: the generator asked four
+   * self-improvement questions in six days because content-word similarity
+   * cannot tell that "get better at" and "area of growth" are one subject. */
+  recentTopics(person: PersonId, limit: number): string[] {
+    const rows = this.db
+      .query<{ topic: string | null }, [PersonId, number]>(
+        `SELECT topic FROM generation_log
+         WHERE person = ? AND topic IS NOT NULL
+         ORDER BY date DESC, id DESC LIMIT ?`,
+      )
+      .all(person, limit);
+    return rows.map((r) => r.topic).filter((t): t is string => t !== null);
   }
 
   /** Every question THIS person was asked before `date`, oldest first.
