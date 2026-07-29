@@ -10,6 +10,7 @@ import { FallbackPromptSource } from "./src/prompts/fallback";
 import { nextDispatchAt, todayInTz } from "./src/scheduler";
 import { OpenRouterClient } from "./src/llm/openrouter";
 import { SupermemoryClient } from "./src/memory/supermemory";
+import { LedgerOntology } from "./src/ontology/ledgerOntology";
 import { processPending } from "./src/extraction/pipeline";
 import { scorePending } from "./src/eval/scoring";
 import { checkAndSendNudges } from "./src/nudge/pipeline";
@@ -38,7 +39,8 @@ const generationLlm = new OpenRouterClient(config.openrouter.apiKey, config.gene
 const memory = new SupermemoryClient(config.supermemory.baseUrl, config.supermemory.apiKey);
 
 const staticSource = new StaticBankPromptSource(bank, ledger);
-const adaptiveSource = new AdaptivePromptSource(memory, generationLlm, ledger, {
+const ontology = new LedgerOntology(ledger);
+const adaptiveSource = new AdaptivePromptSource(ontology, generationLlm, ledger, {
   model: config.generation.model,
   historyWindowDays: config.generation.historyWindowDays,
   feedbackWindowDays: config.generation.feedbackWindowDays,

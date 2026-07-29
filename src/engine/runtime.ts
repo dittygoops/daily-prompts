@@ -313,6 +313,15 @@ export class EngineRuntime {
       case "FinalizeResponse":
         if (this.currentDayId !== null) {
           ledger.finalizeResponse(this.currentDayId, effect.person, effect.text, effect.at);
+          // Fold this answer into the targeted node's yield. No-op on
+          // explore, fallback, and pre-ontology days; isolated so a
+          // bookkeeping bug can never block the share that follows.
+          try {
+            const day = ledger.day(this.currentDayId);
+            ledger.recordYield(day.date, effect.person, effect.text.length);
+          } catch (err) {
+            this.log(`node yield bookkeeping failed (non-fatal): ${err}`);
+          }
         }
         break;
       case "MarkSkipped":

@@ -1,26 +1,28 @@
 import { describe, expect, test } from "bun:test";
 import { ADAPTIVE_SYSTEM_PROMPT, buildGenerationUserPrompt } from "../src/prompts/generationPrompt";
-import type { PersonContext } from "../src/memory/types";
+import { ALL_DOMAINS, type PersonCandidates } from "../src/ontology/types";
 
-const emptyContext: PersonContext = { facts: [], threads: [], interests: [], recentMoods: [], promptPreferences: [] };
-
-const richContext: PersonContext = {
-  facts: ["[2026-07-18] Enjoys birthday dinners at Tandoori Times."],
-  threads: ["[2026-07-19] Nervous about their thesis defense in August."],
-  interests: ["[2026-07-19] Enjoys League of Legends."],
-  recentMoods: [],
-  promptPreferences: ["[2026-07-18] Enjoyed the family-traditions style of question."],
-};
+// Every domain key is required by PersonCandidates["domainCounts"], and a
+// person with no nodes at all still renders a full counts line, so the
+// zero-filled record has to cover every entry in ALL_DOMAINS.
+const emptyCandidates = (): PersonCandidates => ({
+  domainCounts: Object.fromEntries(ALL_DOMAINS.map((d) => [d, 0])) as PersonCandidates["domainCounts"],
+  exploit: [],
+  explore: ["career-academics", "childhood", "family"],
+  offLimits: [],
+});
 
 const baseInput = {
   today: "2026-07-20",
   stanceA: "explore" as const,
   stanceB: "explore" as const,
-  names: { a: "Alex", b: "Sam" } as const,
-  contextA: emptyContext,
-  contextB: emptyContext,
-  coverageA: [] as string[],
-  coverageB: [] as string[],
+  names: { a: "Alex", b: "Sam" },
+  candidatesA: emptyCandidates(),
+  candidatesB: emptyCandidates(),
+  moodsA: [] as string[],
+  moodsB: [] as string[],
+  prefsA: [] as string[],
+  prefsB: [] as string[],
   history: [] as never[],
   feedbackA: [] as string[],
   feedbackB: [] as string[],
@@ -60,10 +62,13 @@ describe("ADAPTIVE_SYSTEM_PROMPT", () => {
     expect(ADAPTIVE_SYSTEM_PROMPT).toContain("usedIdeaId");
   });
 
-  test("each person's question is built from their own memory", () => {
+  test("each person's question is built from their own memory, never the other's", () => {
     const sys = ADAPTIVE_SYSTEM_PROMPT.toLowerCase();
     expect(sys).toMatch(/their own memory/i);
-    expect(sys).toMatch(/own threads/i);
+    // "own threads" described the old facts/threads/interests buckets, which
+    // are gone now that a person's memory is candidate nodes; the surviving
+    // rule is the never-ask-about-the-other's-lived-experience one.
+    expect(sys).toMatch(/never ask one person about something only the other lived through/i);
   });
 
   test("requires the two questions to share a theme", () => {
@@ -80,6 +85,20 @@ describe("ADAPTIVE_SYSTEM_PROMPT", () => {
   test("the JSON shape carries a prompt and stance per person", () => {
     expect(ADAPTIVE_SYSTEM_PROMPT).toContain('"a":{"prompt"');
     expect(ADAPTIVE_SYSTEM_PROMPT).toContain('"b":{"prompt"');
+  });
+
+  test("exploit stance requires citing a targetNodeId from the EXPLOIT CANDIDATES list", () => {
+    expect(ADAPTIVE_SYSTEM_PROMPT).toContain("EXPLOIT CANDIDATES");
+    expect(ADAPTIVE_SYSTEM_PROMPT).toContain('"targetNodeId"');
+  });
+
+  test("explore stance requires citing a targetExplore from the EXPLORE CANDIDATES list", () => {
+    expect(ADAPTIVE_SYSTEM_PROMPT).toContain("EXPLORE CANDIDATES");
+    expect(ADAPTIVE_SYSTEM_PROMPT).toContain('"targetExplore"');
+  });
+
+  test("forbids building a question on anything in a person's OFF LIMITS list", () => {
+    expect(ADAPTIVE_SYSTEM_PROMPT).toContain("OFF LIMITS");
   });
 });
 
@@ -98,8 +117,12 @@ describe("explore/exploit stance", () => {
   });
 
   test("renders the assigned stance prominently in the user prompt", () => {
+    // Asserting on the named per-person line, not the bare word: "EXPLOIT"
+    // now also appears in every prompt as the EXPLOIT CANDIDATES heading, so
+    // a looser check would pass even for an explore assignment.
     const user = buildGenerationUserPrompt({ ...baseInput, stanceA: "exploit" });
-    expect(user).toContain("EXPLOIT");
+    expect(user).toContain("ASSIGNED STANCE FOR ALEX: EXPLOIT");
+    expect(user).toContain("ASSIGNED STANCE FOR SAM: EXPLORE");
   });
 
   test("spells out that a broadly-answerable question does not count as an exploit", () => {
@@ -156,19 +179,71 @@ describe("buildGenerationUserPrompt", () => {
     expect(user).toContain("Sam");
   });
 
-  test("includes facts, threads, interests, and prompt preferences for a person with rich context", () => {
-    const user = buildGenerationUserPrompt({ ...baseInput, contextA: richContext });
-    expect(user).toContain("Tandoori Times");
-    expect(user).toContain("thesis defense");
-    expect(user).toContain("League of Legends");
-    expect(user).toContain("family-traditions style of question");
+  test("renders an exploit candidate node's id, domain, subdomain, flags, summary, dated facts, and prompt preferences", () => {
+    const candidatesA: PersonCandidates = {
+      ...emptyCandidates(),
+      exploit: [
+        {
+          id: 14,
+          domain: "hobbies-interests",
+          subdomain: "guitar",
+          summary: "Learning guitar, practices most days.",
+          rich: true,
+          live: true,
+          lastAsked: null,
+          timesAsked: 0,
+          facts: [
+            { date: "2026-07-18", text: "Started guitar lessons at Tempe Music." },
+            // Kept before baseInput's today: a fact dated in the prompt's own
+            // future would be nonsense for the model to age against.
+            { date: "2026-07-19", text: "Played 'Wonderwall' cleanly for the first time." },
+          ],
+        },
+      ],
+    };
+    const user = buildGenerationUserPrompt({
+      ...baseInput,
+      candidatesA,
+      prefsA: ["Enjoyed the family-traditions style of question."],
+    });
+    // Flag order is [rich/thin, asked/never asked, LIVE], read straight off
+    // candidateLines rather than guessed.
+    expect(user).toContain("[node 14] hobbies-interests / guitar (rich, never asked, LIVE): Learning guitar, practices most days.");
+    expect(user).toContain("      - [2026-07-18] Started guitar lessons at Tempe Music.");
+    expect(user).toContain("      - [2026-07-19] Played 'Wonderwall' cleanly for the first time.");
+    expect(user).toContain("Enjoyed the family-traditions style of question.");
+    expect(user).toContain('EXPLOIT CANDIDATES for Alex (exploit stance must cite one of these ids in "targetNodeId")');
   });
 
-  test("includes coverage-gap topics for both people", () => {
-    const user = buildGenerationUserPrompt({ ...baseInput, coverageA: ["food", "gaming"], coverageB: ["sports"] });
-    expect(user).toContain("food");
-    expect(user).toContain("gaming");
-    expect(user).toContain("sports");
+  test("renders each domain's open-node count on the domain-counts line", () => {
+    const candidatesA: PersonCandidates = {
+      ...emptyCandidates(),
+      domainCounts: { ...emptyCandidates().domainCounts, childhood: 2, family: 1 },
+    };
+    const user = buildGenerationUserPrompt({ ...baseInput, candidatesA });
+    expect(user).toContain("childhood: 2");
+    expect(user).toContain("family: 1");
+  });
+
+  test("lists the offered explore domains and names the targetExplore field they get cited in", () => {
+    const user = buildGenerationUserPrompt(baseInput);
+    expect(user).toContain("career-academics | childhood | family");
+    expect(user).toContain('EXPLORE CANDIDATES for Alex (explore stance must cite one of these domains in "targetExplore")');
+  });
+
+  test("renders off-limits entries with domain, subdomain, and reason", () => {
+    const candidatesA: PersonCandidates = {
+      ...emptyCandidates(),
+      offLimits: [{ domain: "health-body", subdomain: "sleep", reason: "asked yesterday" }],
+    };
+    const user = buildGenerationUserPrompt({ ...baseInput, candidatesA });
+    expect(user).toContain("OFF LIMITS today (do not build a question on any of these):");
+    expect(user).toContain("health-body / sleep (asked yesterday)");
+  });
+
+  test("omits the OFF LIMITS heading when a person has no off-limits topics", () => {
+    const user = buildGenerationUserPrompt(baseInput);
+    expect(user).not.toContain("OFF LIMITS today");
   });
 
   test("includes recent prompt history with per-person outcome and response length, under each person's own section", () => {
@@ -207,7 +282,7 @@ describe("buildGenerationUserPrompt", () => {
     expect(user).toContain("Tokyo trip");
   });
 
-  test("handles fully empty context/coverage/history/feedback/ideas for both people without omitting structure (day-1 case)", () => {
+  test("handles fully empty candidates/moods/prefs/history/feedback/ideas for both people without omitting structure (day-1 case)", () => {
     const user = buildGenerationUserPrompt(baseInput);
     expect(user).toContain("Alex");
     expect(user).toContain("Sam");

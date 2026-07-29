@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildGenerationUserPrompt } from "../../src/prompts/generationPrompt";
+import { ALL_DOMAINS } from "../../src/ontology/types";
 import { memoryState, memoryStates } from "./fixtures/memoryStates";
 
 const render = (name: string) => buildGenerationUserPrompt(memoryState(name).input);
@@ -37,21 +38,31 @@ describe("memory-state fixtures", () => {
     }
   });
 
-  test("no fixture dates a context line or a prior prompt in its own future", () => {
+  test("no fixture dates a candidate fact, a lastAsked, or a prior prompt in its own future", () => {
     for (const s of memoryStates) {
-      const dated = [s.input.contextA, s.input.contextB]
-        .flatMap((c) => [...c.facts, ...c.threads, ...c.interests, ...c.recentMoods, ...c.promptPreferences])
-        .map((line) => line.slice(1, 11));
+      const dated: string[] = [];
+      for (const c of [s.input.candidatesA, s.input.candidatesB]) {
+        for (const n of c.exploit) {
+          for (const f of n.facts) dated.push(f.date);
+          if (n.lastAsked !== null) dated.push(n.lastAsked);
+        }
+      }
       for (const date of [...dated, ...s.input.history.map((h) => h.date)]) {
         expect(date < s.input.today).toBe(true);
       }
     }
   });
 
-  test("every fixture renders every bucket label for both people", () => {
+  test("every fixture renders the exploit, explore, moods and preferences labels once per person", () => {
     for (const s of memoryStates) {
       const rendered = buildGenerationUserPrompt(s.input);
-      for (const label of ["Facts:", "Open threads:", "Interests:", "Recent moods:", "Topics already covered:"]) {
+      for (const label of [
+        "Their life as we know it (open nodes per area):",
+        "EXPLOIT CANDIDATES for",
+        "EXPLORE CANDIDATES for",
+        "Recent moods (time-bound, never durable):",
+        "Prompt preferences (durable, from feedback):",
+      ]) {
         expect(rendered.split(label).length - 1).toBe(2);
       }
     }
@@ -61,9 +72,11 @@ describe("memory-state fixtures", () => {
 describe("day-one-empty", () => {
   test("renders empty-state placeholders rather than omitting the sections", () => {
     const rendered = render("day-one-empty");
-    expect(rendered).toContain("Facts: (none yet)");
-    expect(rendered).toContain("Open threads: (none yet)");
-    expect(rendered).toContain("Topics already covered: (none yet");
+    expect(rendered).toContain(
+      "(none today; if their stance says exploit anyway, explore instead and say so in the rationale)",
+    );
+    expect(rendered).toContain("Recent moods (time-bound, never durable): (none)");
+    expect(rendered).toContain("Prompt preferences (durable, from feedback): (none yet)");
   });
 
   test("signals day one explicitly in each person's history section", () => {
@@ -73,17 +86,19 @@ describe("day-one-empty", () => {
 });
 
 describe("one-sided", () => {
-  test("the populated person's context reaches the prompt", () => {
+  test("the populated person's exploit candidates reach the prompt", () => {
     const rendered = render("one-sided");
     expect(rendered).toContain("Bakes sourdough most weekends.");
     expect(rendered).toContain("Deciding whether to adopt a second cat.");
   });
 
-  test("the empty person still gets placeholders and an empty coverage list", () => {
+  test("the empty person still gets exploit placeholders and an all-zero domain count line", () => {
     const rendered = render("one-sided");
     const samSection = rendered.slice(rendered.indexOf("PERSON B: Sam"));
-    expect(samSection).toContain("Facts: (none yet)");
-    expect(samSection).toContain("Topics already covered: (none yet");
+    expect(samSection).toContain(
+      "(none today; if their stance says exploit anyway, explore instead and say so in the rationale)",
+    );
+    for (const domain of ALL_DOMAINS) expect(samSection).toContain(`${domain}: 0`);
   });
 
   test("the non-answering person shows as no_response in every one of their own history lines", () => {
@@ -94,12 +109,12 @@ describe("one-sided", () => {
 });
 
 describe("rich-both", () => {
-  test("every fact, thread and interest from both contexts survives assembly", () => {
+  test("every exploit candidate fact from both people survives assembly", () => {
     const { input } = memoryState("rich-both");
     const rendered = buildGenerationUserPrompt(input);
-    for (const ctx of [input.contextA, input.contextB]) {
-      for (const entry of [...ctx.facts, ...ctx.threads, ...ctx.interests]) {
-        expect(rendered).toContain(entry);
+    for (const c of [input.candidatesA, input.candidatesB]) {
+      for (const n of c.exploit) {
+        for (const f of n.facts) expect(rendered).toContain(`[${f.date}] ${f.text}`);
       }
     }
   });
@@ -128,11 +143,11 @@ describe("rich-both", () => {
 });
 
 describe("heavy-thread", () => {
-  test("the heavy thread is surfaced to the model under Open threads, not hidden", () => {
+  test("the layoff node is surfaced among Sam's exploit candidates, flagged LIVE, not hidden", () => {
     const rendered = render("heavy-thread");
     const samSection = rendered.slice(rendered.indexOf("PERSON B: Sam"));
-    const threadsLine = samSection.split("\n").find((l) => l.includes("Open threads:"))!;
-    expect(threadsLine).toContain("laid off on Friday");
+    expect(samSection).toContain("LIVE");
+    expect(samSection).toContain("Was laid off on Friday and has not told his parents yet.");
   });
 
   test("the low-energy reply that followed the heavy event is visible in Sam's own history", () => {
@@ -151,9 +166,10 @@ describe("private-asymmetry", () => {
     expect(alexSection).toContain(secret);
   });
 
-  test("the other person's coverage does not mention the private topic", () => {
+  test("Sam's candidates carry no trace of the private job-search node", () => {
     const { input } = memoryState("private-asymmetry");
-    expect(input.coverageB).not.toContain("job search");
+    expect(input.candidatesB.exploit.some((n) => n.subdomain === "job-search")).toBe(false);
+    expect(input.candidatesB.domainCounts["career-academics"]).toBe(0);
   });
 });
 
@@ -180,19 +196,24 @@ describe("feedback-constrained", () => {
 });
 
 describe("stale-threads", () => {
-  test("provenance dates survive into the rendered context so staleness is visible", () => {
+  test("provenance dates survive into the rendered candidate facts so staleness is visible", () => {
     const rendered = render("stale-threads");
     expect(rendered).toContain("[2026-06-14] Waiting to hear back about a conference talk submission.");
     expect(rendered).toContain("[2026-06-12] Deciding whether to run a 10K at the end of the month.");
   });
 
-  test("no context entry is fresher than the stale window the fixture is testing", () => {
-    const { input } = memoryState("stale-threads");
-    const all = [input.contextA, input.contextB].flatMap((c) => [...c.facts, ...c.threads, ...c.interests]);
-    for (const entry of all) expect(entry.startsWith("[2026-06-")).toBe(true);
+  test("the stale node's lastAsked date is surfaced so it reads as already covered, not fresh", () => {
+    const rendered = render("stale-threads");
+    expect(rendered).toContain("last asked 2026-06-20");
   });
 
-  test("today is anchored two months after the newest context line, so the gap is unambiguous", () => {
+  test("no candidate fact is fresher than the stale window the fixture is testing", () => {
+    const { input } = memoryState("stale-threads");
+    const facts = [input.candidatesA, input.candidatesB].flatMap((c) => c.exploit.flatMap((n) => n.facts));
+    for (const f of facts) expect(f.date.startsWith("2026-06-")).toBe(true);
+  });
+
+  test("today is anchored two months after the newest candidate fact, so the gap is unambiguous", () => {
     const { input } = memoryState("stale-threads");
     expect(input.today).toBe("2026-08-14");
     expect(render("stale-threads")).toContain("Today is 2026-08-14");

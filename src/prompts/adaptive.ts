@@ -2,7 +2,8 @@ import { z } from "zod";
 import type { PersonId } from "../config";
 import type { Ledger } from "../ledger/ledger";
 import type { LlmClient } from "../llm/types";
-import type { Memory } from "../memory/types";
+import type { OntologyView } from "../ontology/types";
+import type { NodeDomain } from "../ledger/ledger";
 import { addDays } from "../scheduler";
 import { recentFeedbackByPerson } from "./feedback";
 import { ADAPTIVE_SYSTEM_PROMPT, buildGenerationUserPrompt } from "./generationPrompt";
@@ -28,6 +29,11 @@ const personSchema = z.object({
   // similarity cannot see that "get better at" and "area of growth" are the
   // same subject, and four such questions went out in six days.
   topic: z.string().min(1).max(60),
+  // Exactly one of these matches the assigned stance: the exploit target is
+  // a node id from the offered candidate list, the explore target one of the
+  // offered domains. Validated in code; a miss is a rejected generation.
+  targetNodeId: z.number().int().nullable(),
+  targetExplore: z.string().min(1).max(40).nullable(),
 });
 
 const responseSchema = z.object({
@@ -38,9 +44,9 @@ const responseSchema = z.object({
   usedIdeaId: z.number().nullable().optional(),
 });
 
-// Three rejection reasons now (near-duplicate text, repeated subject,
-// reused sentence frame), so one retry is not enough headroom.
-const MAX_ATTEMPTS = 3;
+// Four rejection reasons (near-duplicate text, repeated subject, reused
+// sentence frame, invalid declared target), so the budget rises with them.
+const MAX_ATTEMPTS = 4;
 
 /** How many of a person's recent subjects are off-limits. Six days of
  * self-improvement questions is what this exists to prevent. */
@@ -59,7 +65,7 @@ const norm = (t: string) => t.trim().toLowerCase();
  * fallback"; it has none. */
 export class AdaptivePromptSource implements PromptSource {
   constructor(
-    private readonly memory: Memory,
+    private readonly ontology: OntologyView,
     private readonly llm: LlmClient,
     private readonly ledger: Ledger,
     private readonly opts: AdaptivePromptSourceOptions,
@@ -68,24 +74,27 @@ export class AdaptivePromptSource implements PromptSource {
   async nextPrompts(date: string): Promise<DailyPrompts> {
     const feedbackWindowStart = addDays(date, -this.opts.feedbackWindowDays);
 
-    const [contextA, contextB, coverageA, coverageB] = await Promise.all([
-      this.memory.getContext("a", this.opts.contextBudgetChars),
-      this.memory.getContext("b", this.opts.contextBudgetChars),
-      this.memory.getCoverage("a"),
-      this.memory.getCoverage("b"),
-    ]);
+    const candidatesA = this.ontology.candidates("a", date);
+    const candidatesB = this.ontology.candidates("b", date);
+    const moodsA = this.ledger.recentSignals("a", "mood_signal", 7, date).map((s) => `[${s.observedDate}] ${s.text}`);
+    const moodsB = this.ledger.recentSignals("b", "mood_signal", 7, date).map((s) => `[${s.observedDate}] ${s.text}`);
+    const prefsA = this.ledger.recentSignals("a", "prompt_preference", null, date).map((s) => s.text);
+    const prefsB = this.ledger.recentSignals("b", "prompt_preference", null, date).map((s) => s.text);
 
     const history = recentPromptHistory(this.ledger, date, this.opts.historyWindowDays);
     const feedback = recentFeedbackByPerson(this.ledger, feedbackWindowStart);
     const ideasA = this.ledger.unconsumedPromptIdeas("a").map((i) => ({ id: i.id, text: i.text }));
     const ideasB = this.ledger.unconsumedPromptIdeas("b").map((i) => ({ id: i.id, text: i.text }));
 
+    // "Has threads" is now exact where it used to be approximate: a person
+    // can be exploited precisely when they have at least one eligible
+    // exploit candidate, which the old signal only gestured at.
     const dayStance = decideStance({
       recentStances: history.map((h) => h.stance),
-      hasThreads: contextA.threads.length > 0 || contextB.threads.length > 0,
+      hasThreads: candidatesA.exploit.length > 0 || candidatesB.exploit.length > 0,
     });
-    const stanceA: Stance = stanceForPerson(dayStance, contextA.threads.length > 0);
-    const stanceB: Stance = stanceForPerson(dayStance, contextB.threads.length > 0);
+    const stanceA: Stance = stanceForPerson(dayStance, candidatesA.exploit.length > 0);
+    const stanceB: Stance = stanceForPerson(dayStance, candidatesB.exploit.length > 0);
 
     const recentThemes = this.ledger.recentThemes(TOPIC_MEMORY_DAYS);
     const recentTopicsA = this.ledger.recentTopics("a", TOPIC_MEMORY_DAYS);
@@ -96,10 +105,12 @@ export class AdaptivePromptSource implements PromptSource {
       stanceA,
       stanceB,
       names: this.opts.names,
-      contextA,
-      contextB,
-      coverageA,
-      coverageB,
+      candidatesA,
+      candidatesB,
+      moodsA,
+      moodsB,
+      prefsA,
+      prefsB,
       history,
       feedbackA: feedback.a,
       feedbackB: feedback.b,
@@ -112,7 +123,15 @@ export class AdaptivePromptSource implements PromptSource {
 
     let lastError: Error | null = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const raw = await this.llm.complete(ADAPTIVE_SYSTEM_PROMPT, userPrompt);
+      // A blind retry reuses the identical prompt and hopes sampling saves
+      // it; observed live, the model missed target validation four times in
+      // a row citing the same unoffered domain. Telling it why it was
+      // rejected is what makes a retry better than a reroll.
+      const attemptPrompt =
+        lastError === null
+          ? userPrompt
+          : `${userPrompt}\n\nYOUR PREVIOUS ATTEMPT WAS REJECTED: ${lastError.message.replace("AdaptivePromptSource: ", "")}. Correct exactly that and answer again.`;
+      const raw = await this.llm.complete(ADAPTIVE_SYSTEM_PROMPT, attemptPrompt);
 
       let parsed: unknown;
       try {
@@ -125,6 +144,50 @@ export class AdaptivePromptSource implements PromptSource {
       if (!shaped.success) {
         lastError = new Error(`AdaptivePromptSource: LLM response missing a valid per-person prompt`);
         continue;
+      }
+
+      // Declared-target validation: the single check that makes the whole
+      // ontology enforceable, and it is a Set lookup. On the FINAL attempt a
+      // target miss ships the question with null targets and a loud log
+      // rather than blocking dispatch: the question itself is probably fine,
+      // the bookkeeping just notes it was unattributed. Wording guards below
+      // keep their existing final-attempt bypass.
+      const validateTarget = (
+        person: "a" | "b",
+        stance: Stance,
+        decl: { targetNodeId: number | null; targetExplore: string | null },
+        offered: { exploit: Set<number>; explore: Set<string> },
+      ): string | null => {
+        if (stance === "exploit") {
+          if (decl.targetNodeId === null || !offered.exploit.has(decl.targetNodeId)) {
+            return `person ${person} exploit target ${decl.targetNodeId} is not an offered candidate`;
+          }
+          if (decl.targetExplore !== null) return `person ${person} declared both targets`;
+        } else {
+          if (decl.targetExplore === null || !offered.explore.has(decl.targetExplore)) {
+            return `person ${person} explore target "${decl.targetExplore}" is not an offered domain`;
+          }
+          if (decl.targetNodeId !== null) return `person ${person} declared both targets`;
+        }
+        return null;
+      };
+      const offeredA = { exploit: new Set(candidatesA.exploit.map((n) => n.id)), explore: new Set<string>(candidatesA.explore) };
+      const offeredB = { exploit: new Set(candidatesB.exploit.map((n) => n.id)), explore: new Set<string>(candidatesB.explore) };
+      // A person whose exploit list is empty was downgraded to explore by
+      // stanceForPerson, so validation always checks against a real list.
+      const targetErrA = validateTarget("a", stanceA, shaped.data.a, offeredA);
+      const targetErrB = validateTarget("b", stanceB, shaped.data.b, offeredB);
+      if ((targetErrA || targetErrB) && attempt < MAX_ATTEMPTS) {
+        lastError = new Error(`AdaptivePromptSource: ${targetErrA ?? targetErrB}`);
+        continue;
+      }
+      // Validity is per person on the final attempt: one person miscited a
+      // target does not discard the other's perfectly good attribution.
+      const validA = targetErrA === null;
+      const validB = targetErrB === null;
+      if (!validA || !validB) {
+        // eslint-disable-next-line no-console
+        console.error(`[adaptive] FINAL-ATTEMPT target miss, shipping unattributed: ${targetErrA ?? targetErrB}`);
       }
 
       // Deterministic repeat guard, per person, since each now has their
@@ -205,8 +268,8 @@ export class AdaptivePromptSource implements PromptSource {
         rationale: shaped.data.rationale,
         stance: stanceA,
         topic: shaped.data.a.topic,
-        targetNodeId: null, // wired when generation consumes the ontology (build step 3)
-        targetDomain: null,
+        targetNodeId: validA ? shaped.data.a.targetNodeId : null,
+        targetDomain: validA ? shaped.data.a.targetExplore : null,
         person: "a",
         fellBack: false,
         fallbackReason: null,
@@ -223,13 +286,19 @@ export class AdaptivePromptSource implements PromptSource {
         rationale: shaped.data.rationale,
         stance: stanceB,
         topic: shaped.data.b.topic,
-        targetNodeId: null, // wired when generation consumes the ontology (build step 3)
-        targetDomain: null,
+        targetNodeId: validB ? shaped.data.b.targetNodeId : null,
+        targetDomain: validB ? shaped.data.b.targetExplore : null,
         person: "b",
         fellBack: false,
         fallbackReason: null,
         at,
       });
+
+      // last_asked moves at dispatch: a question that went out must not
+      // repeat even if it is never answered. times_asked and yield move at
+      // finalization, together, so the count never drifts ahead of the mean.
+      if (validA && shaped.data.a.targetNodeId !== null) this.ledger.recordAsked(shaped.data.a.targetNodeId, date, at);
+      if (validB && shaped.data.b.targetNodeId !== null) this.ledger.recordAsked(shaped.data.b.targetNodeId, date, at);
 
       const usedId = shaped.data.usedIdeaId;
       if (usedId != null) {
