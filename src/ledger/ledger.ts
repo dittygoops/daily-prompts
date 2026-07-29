@@ -489,7 +489,10 @@ export class Ledger {
   }
 
   /** Every (day, person) whose day has left `dispatched` and has no `done`
-   * extraction, and hasn't exhausted the retry cap. Ordered oldest-first.
+   * extraction, and hasn't exhausted the retry cap. Ordered by date then id:
+   * a rebuild replays this in date order to build the graph and attribute
+   * yield chronologically, and day ids are only incidentally chronological
+   * (a backfilled or re-dispatched day can get an id out of date order).
    * An optional `person` filter restricts to just that person's rows (used
    * by a single-person memory rebuild). */
   unprocessedResolvedDays(person?: PersonId): { dayId: number; person: PersonId }[] {
@@ -504,7 +507,7 @@ export class Ledger {
              LEFT JOIN extractions e ON e.day_id = d.id AND e.person = ?
              WHERE d.state != 'dispatched'
                AND (e.day_id IS NULL OR (e.status != 'done' AND e.attempts < ?))
-             ORDER BY d.id`,
+             ORDER BY d.date, d.id`,
           )
           .all(person, person, EXTRACTION_MAX_ATTEMPTS)
       : this.db
@@ -518,7 +521,7 @@ export class Ledger {
              LEFT JOIN extractions e ON e.day_id = d.id AND e.person = p.person
              WHERE d.state != 'dispatched'
                AND (e.day_id IS NULL OR (e.status != 'done' AND e.attempts < ?))
-             ORDER BY d.id, p.person`,
+             ORDER BY d.date, d.id, p.person`,
           )
           .all(EXTRACTION_MAX_ATTEMPTS);
     return rows.map((r) => ({ dayId: r.day_id, person: r.person }));
@@ -709,6 +712,32 @@ export class Ledger {
 
   // ---- Structured ontology (docs/superpowers/specs/2026-07-29) ----
 
+  /** Runs `fn` inside one sqlite transaction. Filing one person-day (nodes,
+   * facts, signals, prompt ideas, markExtraction) must commit atomically: a
+   * crashed retry that ran the extractor twice must never see half of the
+   * first attempt's facts land, or the retry double-files. */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
+  /** Deletes a person's entire graph: facts, then nodes, then signals. FK
+   * order (node_facts.node_id references nodes) - nodes first would violate
+   * the foreign key. Used by a rebuild before replaying the ledger. */
+  wipeGraph(person: PersonId): void {
+    const tx = this.db.transaction(() => {
+      this.db
+        .query(`DELETE FROM node_facts WHERE node_id IN (SELECT id FROM nodes WHERE person = ?)`)
+        .run(person);
+      this.db.query(`DELETE FROM nodes WHERE person = ?`).run(person);
+      this.db.query(`DELETE FROM signals WHERE person = ?`).run(person);
+    });
+    tx();
+  }
+
+  nodeFactCount(nodeId: number): number {
+    return this.db.query<{ n: number }, [number]>(`SELECT COUNT(*) AS n FROM node_facts WHERE node_id = ?`).get(nodeId)!.n;
+  }
+
   createNode(input: {
     person: PersonId;
     domain: NodeDomain;
@@ -825,24 +854,18 @@ export class Ledger {
     return rows.length % 2 === 1 ? rows[mid]!.len : (rows[mid - 1]!.len + rows[mid]!.len) / 2;
   }
 
-  /** Folds one answer into the targeted node's running mean and runs the
-   * depletion check, in one transaction. No-op when the day had no target
-   * (an explore or fallback day). Skips never reach here: a skip is not
-   * evidence the well is dry. */
-  recordYield(
-    date: string,
+  /** Folds one answer into a node's running mean and runs the depletion
+   * check, in one transaction. This is the one copy of the yield math:
+   * `recordYield` looks up its generation-log target and delegates here, and
+   * a rebuild's argmax attribution (which has no generation_log row to look
+   * up, since replay predates any dispatch) calls this directly. */
+  recordYieldForNode(
+    nodeId: number,
     person: PersonId,
+    date: string,
     chars: number,
     opts: { depletionRatio: number; depletionMinAskings: number } = { depletionRatio: 0.5, depletionMinAskings: 2 },
   ): void {
-    const target = this.db
-      .query<{ target_node_id: number | null }, [string, PersonId]>(
-        `SELECT target_node_id FROM generation_log WHERE date = ? AND person = ? AND target_node_id IS NOT NULL LIMIT 1`,
-      )
-      .get(date, person);
-    if (!target?.target_node_id) return;
-    const nodeId = target.target_node_id;
-
     const tx = this.db.transaction(() => {
       this.db
         .query(
@@ -871,6 +894,25 @@ export class Ledger {
       }
     });
     tx();
+  }
+
+  /** Folds one answer into the targeted node's running mean and runs the
+   * depletion check. No-op when the day had no target (an explore or
+   * fallback day). Skips never reach here: a skip is not evidence the well
+   * is dry. */
+  recordYield(
+    date: string,
+    person: PersonId,
+    chars: number,
+    opts: { depletionRatio: number; depletionMinAskings: number } = { depletionRatio: 0.5, depletionMinAskings: 2 },
+  ): void {
+    const target = this.db
+      .query<{ target_node_id: number | null }, [string, PersonId]>(
+        `SELECT target_node_id FROM generation_log WHERE date = ? AND person = ? AND target_node_id IS NOT NULL LIMIT 1`,
+      )
+      .get(date, person);
+    if (!target?.target_node_id) return;
+    this.recordYieldForNode(target.target_node_id, person, date, chars, opts);
   }
 
   /** Generated prompts still awaiting a quality score, oldest first.

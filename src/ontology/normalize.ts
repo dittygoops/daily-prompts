@@ -9,9 +9,15 @@ export function normalizeSubdomain(raw: string): string {
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
   // Trailing-s plural collapse per hyphen segment, guarded so short words
-  // ("gas", "chess") and -ss words keep their s.
+  // ("gas", "chess") keep their s. The -ss/-us/-is/-es exclusions are not
+  // cosmetic: the first live rebuild produced "basi-school" from "Basis",
+  // "career-focu" from "focus" and "childhood-storie" from "stories", because
+  // a bare trailing-s strip mangles singulars that merely end in s and -es
+  // plurals whose stem needs the e dropped too. Not collapsing those is a
+  // cheaper error than storing a corrupted subject name.
+  const KEEPS_TRAILING_S = /(ss|us|is|es)$/;
   return kebab
     .split("-")
-    .map((seg) => (seg.length > 3 && seg.endsWith("s") && !seg.endsWith("ss") ? seg.slice(0, -1) : seg))
+    .map((seg) => (seg.length > 3 && seg.endsWith("s") && !KEEPS_TRAILING_S.test(seg) ? seg.slice(0, -1) : seg))
     .join("-");
 }
