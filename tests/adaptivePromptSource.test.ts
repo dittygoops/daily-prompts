@@ -321,7 +321,7 @@ describe("repetition guards", () => {
     ledger.recordGeneration({
       date: "2026-07-19", promptId: "g", promptText: "q", model: "m", systemPrompt: "s",
       userPrompt: "u", rawResponse: "{}", rationale: "r", stance: "explore",
-      person: "a", topic: "self-improvement", fellBack: false, fallbackReason: null, at: "t",
+      person: "a", topic: "self-improvement", targetNodeId: null, targetDomain: null, fellBack: false, fallbackReason: null, at: "t",
     });
     const memory = new FakeMemory();
     let call = 0;

@@ -205,6 +205,8 @@ export class AdaptivePromptSource implements PromptSource {
         rationale: shaped.data.rationale,
         stance: stanceA,
         topic: shaped.data.a.topic,
+        targetNodeId: null, // wired when generation consumes the ontology (build step 3)
+        targetDomain: null,
         person: "a",
         fellBack: false,
         fallbackReason: null,
@@ -221,6 +223,8 @@ export class AdaptivePromptSource implements PromptSource {
         rationale: shaped.data.rationale,
         stance: stanceB,
         topic: shaped.data.b.topic,
+        targetNodeId: null, // wired when generation consumes the ontology (build step 3)
+        targetDomain: null,
         person: "b",
         fellBack: false,
         fallbackReason: null,

@@ -99,6 +99,54 @@ CREATE TABLE IF NOT EXISTS prompt_scores (
   at TEXT NOT NULL
 );
 
+-- The structured ontology (docs/superpowers/specs/2026-07-29): a node is a
+-- subject in one person's life, a fact is evidence attached to it. UNIQUE is
+-- deliberately (person, subdomain) and NOT per-domain: review showed one real
+-- answer filing the same subject under three domains, so the subject has one
+-- identity per person and the domain is a mutable attribute.
+CREATE TABLE IF NOT EXISTS nodes (
+  id INTEGER PRIMARY KEY,
+  person TEXT NOT NULL CHECK (person IN ('a','b')),
+  domain TEXT NOT NULL CHECK (domain IN (
+    'career-academics','childhood','family','relationships-friends',
+    'hobbies-interests','health-body','daily-life','beliefs-values',
+    'plans-future','other'
+  )),
+  subdomain TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','depleted','closed')),
+  event_date TEXT,
+  last_asked TEXT,
+  times_asked INTEGER NOT NULL DEFAULT 0,
+  avg_yield_chars REAL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (person, subdomain)
+);
+
+CREATE TABLE IF NOT EXISTS node_facts (
+  id INTEGER PRIMARY KEY,
+  node_id INTEGER NOT NULL REFERENCES nodes(id),
+  kind TEXT NOT NULL CHECK (kind IN ('fact','thread','interest')),
+  text TEXT NOT NULL,
+  source_day_id INTEGER NOT NULL,
+  observed_date TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- Moods and prompt preferences are about the person right now or about the
+-- check-in itself, not subjects in their life. Kept out of the graph so a
+-- durable node summary can never bake in "seems drained this week" and so
+-- node counts reflect life content only.
+CREATE TABLE IF NOT EXISTS signals (
+  id INTEGER PRIMARY KEY,
+  person TEXT NOT NULL CHECK (person IN ('a','b')),
+  kind TEXT NOT NULL CHECK (kind IN ('mood_signal','prompt_preference')),
+  text TEXT NOT NULL,
+  observed_date TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS recap_log (
   id INTEGER PRIMARY KEY,
   week_start TEXT NOT NULL,

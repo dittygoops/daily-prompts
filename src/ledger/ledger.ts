@@ -2,6 +2,8 @@ import { Database } from "bun:sqlite";
 import { chmodSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PersonId } from "../config";
+import { normalizeSubdomain } from "../ontology/normalize";
+import { shouldDeplete } from "../ontology/status";
 
 export type DayState =
   | "dispatched"
@@ -80,6 +82,12 @@ export interface GenerationLogEntry {
   /** Which person this prompt was generated for. Null on fallback rows,
    * where neither person got a tailored prompt. */
   person: PersonId | null;
+  /** The node this question targeted (exploit days), or null. Not a foreign
+   * key: this is an append-only audit table and a rebuild that renumbers
+   * nodes must never fail its inserts. */
+  targetNodeId: number | null;
+  /** The domain this question opened (explore days), or null. */
+  targetDomain: string | null;
   /** The subject the generator declared for this question, as a short tag.
    * Declared so repetition can be rejected deterministically: content-word
    * similarity cannot see that "get better at" and "area of growth" are the
@@ -123,7 +131,8 @@ interface GenerationLogDbRow {
   id: number; date: string; prompt_id: string | null; prompt_text: string | null;
   model: string | null; system_prompt: string | null; user_prompt: string | null;
   raw_response: string | null; rationale: string | null; stance: string | null;
-  person: PersonId | null; topic: string | null; fell_back: number; fallback_reason: string | null; at: string;
+  person: PersonId | null; topic: string | null; target_node_id: number | null; target_domain: string | null;
+  fell_back: number; fallback_reason: string | null; at: string;
 }
 
 const toGenerationLogRow = (r: GenerationLogDbRow): GenerationLogRow => ({
@@ -139,9 +148,63 @@ const toGenerationLogRow = (r: GenerationLogDbRow): GenerationLogRow => ({
   stance: r.stance,
   person: r.person,
   topic: r.topic,
+  targetNodeId: r.target_node_id,
+  targetDomain: r.target_domain,
   fellBack: r.fell_back === 1,
   fallbackReason: r.fallback_reason,
   at: r.at,
+});
+
+export type NodeDomain =
+  | "career-academics" | "childhood" | "family" | "relationships-friends"
+  | "hobbies-interests" | "health-body" | "daily-life" | "beliefs-values"
+  | "plans-future" | "other";
+
+export type NodeStatusValue = "open" | "depleted" | "closed";
+
+export interface NodeRow {
+  id: number;
+  person: PersonId;
+  domain: NodeDomain;
+  subdomain: string;
+  summary: string;
+  status: NodeStatusValue;
+  eventDate: string | null;
+  lastAsked: string | null;
+  timesAsked: number;
+  avgYieldChars: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NodeFactRow {
+  id: number;
+  nodeId: number;
+  kind: "fact" | "thread" | "interest";
+  text: string;
+  sourceDayId: number;
+  observedDate: string;
+}
+
+export interface SignalRow {
+  id: number;
+  person: PersonId;
+  kind: "mood_signal" | "prompt_preference";
+  text: string;
+  observedDate: string;
+}
+
+interface NodeDbRow {
+  id: number; person: PersonId; domain: NodeDomain; subdomain: string; summary: string;
+  status: NodeStatusValue; event_date: string | null; last_asked: string | null;
+  times_asked: number; avg_yield_chars: number | null; created_at: string; updated_at: string;
+}
+
+const toNodeRow = (r: NodeDbRow): NodeRow => ({
+  id: r.id, person: r.person, domain: r.domain, subdomain: r.subdomain, summary: r.summary,
+  status: r.status, eventDate: r.event_date, lastAsked: r.last_asked,
+  timesAsked: r.times_asked, avgYieldChars: r.avg_yield_chars,
+  createdAt: r.created_at, updatedAt: r.updated_at,
 });
 
 export interface PromptIdeaRow {
@@ -200,6 +263,12 @@ export class Ledger {
     // fallback row represents a day where no per-person generation happened.
     if (!has("generation_log", "person")) {
       db.exec("ALTER TABLE generation_log ADD COLUMN person TEXT");
+    }
+    if (!has("generation_log", "target_node_id")) {
+      db.exec("ALTER TABLE generation_log ADD COLUMN target_node_id INTEGER");
+    }
+    if (!has("generation_log", "target_domain")) {
+      db.exec("ALTER TABLE generation_log ADD COLUMN target_domain TEXT");
     }
     if (!has("generation_log", "topic")) {
       db.exec("ALTER TABLE generation_log ADD COLUMN topic TEXT");
@@ -552,8 +621,8 @@ export class Ledger {
     this.db
       .query(
         `INSERT INTO generation_log
-           (date, prompt_id, prompt_text, model, system_prompt, user_prompt, raw_response, rationale, stance, person, topic, fell_back, fallback_reason, at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (date, prompt_id, prompt_text, model, system_prompt, user_prompt, raw_response, rationale, stance, person, topic, target_node_id, target_domain, fell_back, fallback_reason, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         entry.date,
@@ -567,6 +636,8 @@ export class Ledger {
         entry.stance,
         entry.person,
         entry.topic,
+        entry.targetNodeId,
+        entry.targetDomain,
         entry.fellBack ? 1 : 0,
         entry.fallbackReason,
         entry.at,
@@ -634,6 +705,172 @@ export class Ledger {
       )
       .all(person, date);
     return rows.map((r) => r.prompt_text).filter((t): t is string => t !== null && t.length > 0);
+  }
+
+  // ---- Structured ontology (docs/superpowers/specs/2026-07-29) ----
+
+  createNode(input: {
+    person: PersonId;
+    domain: NodeDomain;
+    subdomain: string;
+    summary: string;
+    eventDate: string | null;
+    at: string;
+  }): number {
+    // Normalized before the UNIQUE check so "Fitness Goals" and
+    // "fitness-goal" are one identity, not two nodes.
+    const subdomain = normalizeSubdomain(input.subdomain);
+    const row = this.db
+      .query<{ id: number }, [PersonId, NodeDomain, string, string, string | null, string, string]>(
+        `INSERT INTO nodes (person, domain, subdomain, summary, event_date, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+      )
+      .get(input.person, input.domain, subdomain, input.summary, input.eventDate, input.at, input.at)!;
+    return row.id;
+  }
+
+  addNodeFact(input: {
+    nodeId: number;
+    kind: "fact" | "thread" | "interest";
+    text: string;
+    sourceDayId: number;
+    observedDate: string;
+    at: string;
+  }): void {
+    this.db
+      .query(`INSERT INTO node_facts (node_id, kind, text, source_day_id, observed_date, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(input.nodeId, input.kind, input.text, input.sourceDayId, input.observedDate, input.at);
+    // Depletion and closure are claims about the past; new evidence beats
+    // both. Without this the graph can only decay.
+    this.db
+      .query(`UPDATE nodes SET status = 'open', updated_at = ? WHERE id = ? AND status != 'open'`)
+      .run(input.at, input.nodeId);
+  }
+
+  addSignal(input: {
+    person: PersonId;
+    kind: "mood_signal" | "prompt_preference";
+    text: string;
+    observedDate: string;
+    at: string;
+  }): void {
+    this.db
+      .query(`INSERT INTO signals (person, kind, text, observed_date, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(input.person, input.kind, input.text, input.observedDate, input.at);
+  }
+
+  /** Moods are windowed (a mood is not durable); preferences pass null to
+   * read the person's standing taste in full. */
+  recentSignals(person: PersonId, kind: "mood_signal" | "prompt_preference", windowDays: number | null, today: string): SignalRow[] {
+    const rows = windowDays === null
+      ? this.db
+          .query<{ id: number; person: PersonId; kind: SignalRow["kind"]; text: string; observed_date: string }, [PersonId, string]>(
+            `SELECT id, person, kind, text, observed_date FROM signals WHERE person = ? AND kind = ? ORDER BY observed_date`,
+          )
+          .all(person, kind)
+      : this.db
+          .query<{ id: number; person: PersonId; kind: SignalRow["kind"]; text: string; observed_date: string }, [PersonId, string, string, number]>(
+            `SELECT id, person, kind, text, observed_date FROM signals
+             WHERE person = ? AND kind = ? AND observed_date >= date(?, '-' || ? || ' days')
+             ORDER BY observed_date`,
+          )
+          .all(person, kind, today, windowDays);
+    return rows.map((r) => ({ id: r.id, person: r.person, kind: r.kind, text: r.text, observedDate: r.observed_date }));
+  }
+
+  nodesFor(person: PersonId): NodeRow[] {
+    return this.db
+      .query<NodeDbRow, [PersonId]>(`SELECT * FROM nodes WHERE person = ? ORDER BY id`)
+      .all(person)
+      .map(toNodeRow);
+  }
+
+  nodeFactsFor(nodeId: number): NodeFactRow[] {
+    return this.db
+      .query<{ id: number; node_id: number; kind: NodeFactRow["kind"]; text: string; source_day_id: number; observed_date: string }, [number]>(
+        `SELECT id, node_id, kind, text, source_day_id, observed_date FROM node_facts WHERE node_id = ? ORDER BY observed_date, id`,
+      )
+      .all(nodeId)
+      .map((r) => ({ id: r.id, nodeId: r.node_id, kind: r.kind, text: r.text, sourceDayId: r.source_day_id, observedDate: r.observed_date }));
+  }
+
+  setNodeStatus(nodeId: number, status: NodeStatusValue, at: string): void {
+    this.db.query(`UPDATE nodes SET status = ?, updated_at = ? WHERE id = ?`).run(status, at, nodeId);
+  }
+
+  updateNodeSummary(nodeId: number, summary: string, at: string): void {
+    this.db.query(`UPDATE nodes SET summary = ?, updated_at = ? WHERE id = ?`).run(summary, at, nodeId);
+  }
+
+  /** A question went out about this node; it must not repeat even if never
+   * answered. times_asked deliberately does NOT move here: it increments at
+   * finalization together with the yield it feeds, so the count can never
+   * drift ahead of the answers behind the mean. */
+  recordAsked(nodeId: number, date: string, at: string): void {
+    this.db.query(`UPDATE nodes SET last_asked = ?, updated_at = ? WHERE id = ?`).run(date, at, nodeId);
+  }
+
+  /** Median of this person's answered lengths; the baseline that makes
+   * depletion relative rather than an absolute floor no real answer crosses. */
+  personMedianAnswerChars(person: PersonId): number | null {
+    const rows = this.db
+      .query<{ len: number }, [PersonId]>(
+        `SELECT length(response_text) AS len FROM person_days
+         WHERE person = ? AND state = 'answered' AND response_text IS NOT NULL
+         ORDER BY len`,
+      )
+      .all(person);
+    if (rows.length === 0) return null;
+    const mid = Math.floor(rows.length / 2);
+    return rows.length % 2 === 1 ? rows[mid]!.len : (rows[mid - 1]!.len + rows[mid]!.len) / 2;
+  }
+
+  /** Folds one answer into the targeted node's running mean and runs the
+   * depletion check, in one transaction. No-op when the day had no target
+   * (an explore or fallback day). Skips never reach here: a skip is not
+   * evidence the well is dry. */
+  recordYield(
+    date: string,
+    person: PersonId,
+    chars: number,
+    opts: { depletionRatio: number; depletionMinAskings: number } = { depletionRatio: 0.5, depletionMinAskings: 2 },
+  ): void {
+    const target = this.db
+      .query<{ target_node_id: number | null }, [string, PersonId]>(
+        `SELECT target_node_id FROM generation_log WHERE date = ? AND person = ? AND target_node_id IS NOT NULL LIMIT 1`,
+      )
+      .get(date, person);
+    if (!target?.target_node_id) return;
+    const nodeId = target.target_node_id;
+
+    const tx = this.db.transaction(() => {
+      this.db
+        .query(
+          `UPDATE nodes SET
+             avg_yield_chars = ((COALESCE(avg_yield_chars, 0) * times_asked) + ?) / (times_asked + 1),
+             times_asked = times_asked + 1,
+             last_asked = ?,
+             updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(chars, date, new Date().toISOString(), nodeId);
+
+      const node = this.db.query<NodeDbRow, [number]>(`SELECT * FROM nodes WHERE id = ?`).get(nodeId)!;
+      const median = this.personMedianAnswerChars(person);
+      if (
+        median !== null &&
+        shouldDeplete({
+          timesAsked: node.times_asked,
+          avgYieldChars: node.avg_yield_chars,
+          personMedianChars: median,
+          depletionRatio: opts.depletionRatio,
+          depletionMinAskings: opts.depletionMinAskings,
+        })
+      ) {
+        this.db.query(`UPDATE nodes SET status = 'depleted' WHERE id = ?`).run(nodeId);
+      }
+    });
+    tx();
   }
 
   /** Generated prompts still awaiting a quality score, oldest first.

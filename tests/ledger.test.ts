@@ -81,7 +81,7 @@ describe("per-person prompts", () => {
     ledger.recordGeneration({
       date: "2026-07-18", promptId: "gen-a", promptText: "How is the guitar going?",
       model: "m", systemPrompt: "s", userPrompt: "u", rawResponse: "{}",
-      rationale: "r", stance: "exploit", person: "a", topic: null,
+      rationale: "r", stance: "exploit", person: "a", topic: null, targetNodeId: null, targetDomain: null,
       fellBack: false, fallbackReason: null, at: "t",
     });
     expect(ledger.generationLogFor("2026-07-18")[0]!.person).toBe("a");
@@ -91,7 +91,7 @@ describe("per-person prompts", () => {
     ledger.recordGeneration({
       date: "2026-07-18", promptId: null, promptText: null,
       model: null, systemPrompt: null, userPrompt: null, rawResponse: null,
-      rationale: null, stance: null, person: null, topic: null,
+      rationale: null, stance: null, person: null, topic: null, targetNodeId: null, targetDomain: null,
       fellBack: true, fallbackReason: "LLM outage", at: "t",
     });
     expect(ledger.generationLogFor("2026-07-18")[0]!.person).toBeNull();
@@ -102,7 +102,7 @@ describe("prompt scores", () => {
   const gen = (date: string, text: string | null, fellBack = false) => ({
     date, promptId: text ? `gen-${date}` : null, promptText: text,
     model: "m", systemPrompt: "s", userPrompt: "u", rawResponse: "{}",
-    rationale: "r", stance: "explore", person: null, topic: null, fellBack, fallbackReason: null, at: "t",
+    rationale: "r", stance: "explore", person: null, topic: null, targetNodeId: null, targetDomain: null, fellBack, fallbackReason: null, at: "t",
   });
 
   test("a generated prompt with no score row is pending", () => {
@@ -326,7 +326,7 @@ describe("generation_log", () => {
     ledger.recordGeneration({
       date: "2026-07-18", promptId: "gen-2026-07-18", promptText: "How did the defense go?",
       model: "m", systemPrompt: "sys", userPrompt: "usr", rawResponse: "{}",
-      rationale: "following up on the thesis thread", stance: "exploit", person: null, topic: null,
+      rationale: "following up on the thesis thread", stance: "exploit", person: null, topic: null, targetNodeId: null, targetDomain: null,
       fellBack: false, fallbackReason: null, at: "t",
     });
     expect(ledger.generationLogFor("2026-07-18")[0]!.stance).toBe("exploit");
@@ -336,7 +336,7 @@ describe("generation_log", () => {
     ledger.recordGeneration({
       date: "2026-07-18", promptId: null, promptText: null,
       model: null, systemPrompt: null, userPrompt: null, rawResponse: null,
-      rationale: null, stance: null, person: null, topic: null,
+      rationale: null, stance: null, person: null, topic: null, targetNodeId: null, targetDomain: null,
       fellBack: true, fallbackReason: "LLM outage", at: "t",
     });
     expect(ledger.generationLogFor("2026-07-18")[0]!.stance).toBeNull();
@@ -347,7 +347,7 @@ describe("generation_log", () => {
       date: "2026-07-18", promptId: "gen-2026-07-18", promptText: "What's on your mind?",
       model: "google/gemini-2.5-flash", systemPrompt: "sys", userPrompt: "usr",
       rawResponse: '{"prompt":"..."}', rationale: "exploit thesis thread",
-      stance: null, person: null, topic: null,
+      stance: null, person: null, topic: null, targetNodeId: null, targetDomain: null,
       fellBack: false, fallbackReason: null, at: "t",
     });
     const rows = ledger.generationLogFor("2026-07-18");
@@ -360,7 +360,7 @@ describe("generation_log", () => {
       date: "2026-07-18", promptId: null, promptText: null,
       model: null, systemPrompt: null, userPrompt: null,
       rawResponse: null, rationale: null,
-      stance: null, person: null, topic: null,
+      stance: null, person: null, topic: null, targetNodeId: null, targetDomain: null,
       fellBack: true, fallbackReason: "LLM outage", at: "t",
     });
     const rows = ledger.generationLogFor("2026-07-18");
@@ -371,7 +371,7 @@ describe("generation_log", () => {
     const entry = (date: string, promptText: string) => ({
       date, promptId: `gen-${date}`, promptText,
       model: "m", systemPrompt: "sys", userPrompt: "usr", rawResponse: "{}",
-      rationale: "r", stance: null, person: null, topic: null, fellBack: false, fallbackReason: null, at: `${date}T08:00:00Z`,
+      rationale: "r", stance: null, person: null, topic: null, targetNodeId: null, targetDomain: null, fellBack: false, fallbackReason: null, at: `${date}T08:00:00Z`,
     });
     ledger.recordGeneration(entry("2026-07-20", "third"));
     ledger.recordGeneration(entry("2026-07-18", "first"));
@@ -383,12 +383,12 @@ describe("generation_log", () => {
     ledger.recordGeneration({
       date: "2026-07-18", promptId: "gen-2026-07-18", promptText: "ok",
       model: "m", systemPrompt: "sys", userPrompt: "usr", rawResponse: "{}",
-      rationale: "r", stance: null, person: null, topic: null, fellBack: false, fallbackReason: null, at: "t1",
+      rationale: "r", stance: null, person: null, topic: null, targetNodeId: null, targetDomain: null, fellBack: false, fallbackReason: null, at: "t1",
     });
     ledger.recordGeneration({
       date: "2026-07-19", promptId: null, promptText: null,
       model: null, systemPrompt: null, userPrompt: null, rawResponse: null, rationale: null,
-      stance: null, person: null, topic: null,
+      stance: null, person: null, topic: null, targetNodeId: null, targetDomain: null,
       fellBack: true, fallbackReason: "LLM outage", at: "t2",
     });
     expect(ledger.allGenerationLog().map((r) => r.fellBack)).toEqual([false, true]);
@@ -586,7 +586,7 @@ describe("recent prompt topics", () => {
   const g = (date: string, person: "a" | "b", topic: string) => ({
     date, promptId: `gen-${date}-${person}`, promptText: "q", model: "m",
     systemPrompt: "s", userPrompt: "u", rawResponse: "{}", rationale: "r",
-    stance: "explore", person, topic, fellBack: false, fallbackReason: null, at: "t",
+    stance: "explore", person, topic, targetNodeId: null, targetDomain: null, fellBack: false, fallbackReason: null, at: "t",
   });
 
   test("returns that person's recent topics, most recent first", () => {

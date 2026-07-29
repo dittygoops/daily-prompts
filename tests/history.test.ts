@@ -65,7 +65,7 @@ describe("per-person stance", () => {
   const gen = (date: string, person: "a" | "b" | null, stance: string) => ({
     date, promptId: `gen-${date}-${person ?? "x"}`, promptText: "q",
     model: "m", systemPrompt: "s", userPrompt: "u", rawResponse: "{}",
-    rationale: "r", stance, person, topic: null, fellBack: false, fallbackReason: null, at: "t",
+    rationale: "r", stance, person, topic: null, targetNodeId: null, targetDomain: null, fellBack: false, fallbackReason: null, at: "t",
   });
 
   test("each person's stance comes from their own generation row", () => {

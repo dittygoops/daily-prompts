@@ -27,7 +27,7 @@ function seed(ledger: Ledger, date: string, text: string) {
   ledger.recordGeneration({
     date, promptId: `gen-${date}`, promptText: text,
     model: "m", systemPrompt: "s", userPrompt: "u", rawResponse: "{}",
-    rationale: "r", stance: "explore", person: null, topic: null, fellBack: false, fallbackReason: null, at: "t",
+    rationale: "r", stance: "explore", person: null, topic: null, targetNodeId: null, targetDomain: null, fellBack: false, fallbackReason: null, at: "t",
   });
 }
 
