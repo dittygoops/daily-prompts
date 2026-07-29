@@ -65,7 +65,11 @@ function buildInput(ledger: Ledger, dayId: number, person: PersonId): Extraction
   return {
     dayId,
     date: day.date,
-    promptText: day.prompt_text,
+    // The question THIS person was asked. days.prompt_text now holds the
+    // day's shared theme, and telling the extractor the theme was the
+    // question corrupts its reading of the answer. The fallback covers only
+    // rows predating the per-person migration's backfill.
+    promptText: personDay.prompt_text ?? day.prompt_text,
     person,
     response: personDay.state === "answered" ? personDay.response_text : null,
     // v0 simplification (accepted, not distinguished): a literal SKIP and a

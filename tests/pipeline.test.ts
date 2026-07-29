@@ -263,3 +263,27 @@ describe("processPending", () => {
     expect(result).toEqual({ processed: 3, failed: 1 });
   });
 });
+
+describe("per-person extraction input", () => {
+  test("the extractor is told the question THIS person was asked, not the day's theme", async () => {
+    // Live bug: after per-person prompts, days.prompt_text holds the theme
+    // ("Current self-improvement efforts"), and the extractor was told that
+    // was the question, corrupting its reading of every answer.
+    const ledger = Ledger.open(":memory:");
+    const day = ledger.createDay("2026-07-28", "gen-a", "Current self-improvement efforts", "t", "Current self-improvement efforts");
+    ledger.setPersonPrompt(day.id, "a", "gen-a", "How is the guitar practice going?");
+    ledger.finalizeResponse(day.id, "a", "slowly but well", "t1");
+    ledger.resolveDay(day.id, "resolved_partial", "t2");
+    const calls: { user: string }[] = [];
+    const llm: LlmClient = {
+      async complete(_s, user) {
+        calls.push({ user });
+        return JSON.stringify({ observations: [], promptIdeas: [] });
+      },
+    };
+    await processPending({ ledger, llm, memory: new FakeMemory(), log: () => {} });
+    const aCall = calls.find((c) => c.user.includes("slowly but well"))!;
+    expect(aCall.user).toContain("How is the guitar practice going?");
+    expect(aCall.user).not.toContain("Current self-improvement efforts");
+  });
+});
