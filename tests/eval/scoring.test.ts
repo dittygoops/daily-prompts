@@ -88,4 +88,41 @@ describe("scorePending", () => {
     expect(await scorePending({ ledger, llm: ok.client, model: "judge-model", log: () => {} }))
       .toEqual({ scored: 1, failed: 0 });
   });
+
+  test("runs audits for today after the scoring loop and persists any violations found", async () => {
+    const ledger = Ledger.open(":memory:");
+    seed(ledger, "2026-07-18", "first");
+    const nodeId = ledger.createNode({
+      person: "a", domain: "daily-life", subdomain: "cooking", summary: "s", eventDate: null, at: "t0",
+    });
+    // A1 bait: the same node asked twice four days apart, well inside the
+    // default 14-day subject cooldown, so runAudits must find and persist it.
+    for (const [date, id] of [["2026-07-01", "g1"], ["2026-07-05", "g2"]] as const) {
+      ledger.recordGeneration({
+        date, promptId: id, promptText: "q", model: "m", systemPrompt: "s", userPrompt: "u", rawResponse: "{}",
+        rationale: "r", stance: "exploit", person: "a", topic: null, targetNodeId: nodeId, targetDomain: null,
+        fellBack: false, fallbackReason: null, at: "t", lane: "exploit", askDomain: null, askFamily: null,
+      });
+    }
+    const { client } = fakeLlm(() => judgeResponse());
+    await scorePending({ ledger, llm: client, model: "judge-model", log: () => {}, now: () => "2026-07-05T00:00:00Z" });
+    const violations = ledger.auditViolationsSince("2026-07-05");
+    expect(violations.some((v) => v.audit === "A1" && v.subject === String(nodeId))).toBe(true);
+  });
+
+  test("an audit failure runs in its own try/catch and never fails scoring", async () => {
+    const ledger = Ledger.open(":memory:");
+    seed(ledger, "2026-07-18", "first");
+    // Simulate a bug inside the audit machinery: runAudits calls
+    // ledger.recentAsks internally, so breaking that call point is enough to
+    // prove scoring survives an audit-side throw without touching audits.ts.
+    (ledger as unknown as { recentAsks: () => never }).recentAsks = () => {
+      throw new Error("audit machinery broke");
+    };
+    const { client } = fakeLlm(() => judgeResponse());
+    const logs: string[] = [];
+    const result = await scorePending({ ledger, llm: client, model: "judge-model", log: (m) => logs.push(m) });
+    expect(result).toEqual({ scored: 1, failed: 0 });
+    expect(logs.some((l) => l.toLowerCase().includes("audit"))).toBe(true);
+  });
 });

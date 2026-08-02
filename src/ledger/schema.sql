@@ -80,6 +80,24 @@ CREATE TABLE IF NOT EXISTS generation_log (
   fell_back INTEGER NOT NULL DEFAULT 0,
   fallback_reason TEXT,
   at TEXT NOT NULL
+  -- lane, seed_id, ask_domain, ask_family (2026-08-02 synthesis design) are
+  -- added via guarded ALTER in Ledger.migrateSchema, not here, so both fresh
+  -- and existing databases go through one code path.
+);
+
+-- Audits (2026-08-02 synthesis design) persist their violations here so a
+-- rerun of the nightly poller never double-counts the same finding. Person
+-- and subject are plain text, not foreign keys: an audit row must survive a
+-- node being renumbered or removed by a later rebuild.
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY,
+  run_date TEXT NOT NULL,
+  audit TEXT NOT NULL,
+  person TEXT,
+  subject TEXT,
+  detail TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE (run_date, audit, person, subject)
 );
 
 -- Rolling quality scores for generated prompts (eval harness phase 3), so
@@ -104,21 +122,27 @@ CREATE TABLE IF NOT EXISTS prompt_scores (
 -- deliberately (person, subdomain) and NOT per-domain: review showed one real
 -- answer filing the same subject under three domains, so the subject has one
 -- identity per person and the domain is a mutable attribute.
+-- 2026-08-02 synthesis design: status and avg_yield_chars are dropped (budget
+-- replaces both, see Ledger.grantBudget/recordAsk/resolveOpenThreads/
+-- refillBudget) and budget/family are added. A live database reaches this
+-- shape via the FK-safe rebuild in Ledger.migrateSchema, guarded on
+-- 'tastes-preferences' being present in this CHECK; a fresh database gets it
+-- directly here and skips the rebuild entirely.
 CREATE TABLE IF NOT EXISTS nodes (
   id INTEGER PRIMARY KEY,
   person TEXT NOT NULL CHECK (person IN ('a','b')),
   domain TEXT NOT NULL CHECK (domain IN (
     'career-academics','childhood','family','relationships-friends',
     'hobbies-interests','health-body','daily-life','beliefs-values',
-    'plans-future','other'
+    'plans-future','other','tastes-preferences'
   )),
   subdomain TEXT NOT NULL,
   summary TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','depleted','closed')),
+  budget INTEGER,
+  family TEXT,
   event_date TEXT,
   last_asked TEXT,
   times_asked INTEGER NOT NULL DEFAULT 0,
-  avg_yield_chars REAL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE (person, subdomain)
@@ -132,6 +156,8 @@ CREATE TABLE IF NOT EXISTS node_facts (
   source_day_id INTEGER NOT NULL,
   observed_date TEXT NOT NULL,
   created_at TEXT NOT NULL
+  -- resolved_at is added via guarded ALTER in Ledger.migrateSchema (spec:
+  -- "node_facts.resolved_at via guarded ALTER"), not here.
 );
 
 -- Moods and prompt preferences are about the person right now or about the

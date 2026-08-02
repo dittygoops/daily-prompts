@@ -10,7 +10,9 @@ import { FallbackPromptSource } from "./src/prompts/fallback";
 import { nextDispatchAt, todayInTz } from "./src/scheduler";
 import { OpenRouterClient } from "./src/llm/openrouter";
 import { SupermemoryClient } from "./src/memory/supermemory";
-import { LedgerOntology } from "./src/ontology/ledgerOntology";
+import { buildSelectionInput } from "./src/selection/read";
+import { selectPair } from "./src/selection/select";
+import { anchorCheck } from "./src/selection/anchor";
 import { processPending } from "./src/extraction/pipeline";
 import { scorePending } from "./src/eval/scoring";
 import { checkAndSendNudges } from "./src/nudge/pipeline";
@@ -39,13 +41,20 @@ const generationLlm = new OpenRouterClient(config.openrouter.apiKey, config.gene
 const memory = new SupermemoryClient(config.supermemory.baseUrl, config.supermemory.apiKey);
 
 const staticSource = new StaticBankPromptSource(bank, ledger);
-const ontology = new LedgerOntology(ledger);
-const adaptiveSource = new AdaptivePromptSource(ontology, generationLlm, ledger, {
+// The selection module's pure exports, adapted to the writer's injected
+// contract. Code picks the target; the model only writes the sentence.
+const selectionDeps = {
+  buildSelectionInput: (date: string) => buildSelectionInput(ledger, date, config.selection),
+  selectPair,
+  checkAnchor: (text: string, target: { subdomain: string; summary: string; facts: { text: string }[] }, min: number) =>
+    anchorCheck(text, { subdomain: target.subdomain, summary: target.summary }, target.facts.map((f) => f.text), min),
+};
+const adaptiveSource = new AdaptivePromptSource(selectionDeps, generationLlm, ledger, {
   model: config.generation.model,
   historyWindowDays: config.generation.historyWindowDays,
   feedbackWindowDays: config.generation.feedbackWindowDays,
-  contextBudgetChars: config.generation.contextBudgetChars,
   names: { a: config.participants.a.name, b: config.participants.b.name },
+  constants: config.selection,
 });
 const promptSource = new FallbackPromptSource(adaptiveSource, staticSource, { ledger, log });
 
@@ -128,7 +137,7 @@ async function runExtraction(): Promise<void> {
 // one judge call per generated day and no-ops the rest of the time.
 async function runScoring(): Promise<void> {
   try {
-    const result = await scorePending({ ledger, llm: extractionLlm, model: config.extraction.model, log });
+    const result = await scorePending({ ledger, llm: extractionLlm, model: config.extraction.model, log, selectionConstants: config.selection });
     if (result.scored > 0 || result.failed > 0) {
       log(`prompt scoring pass: ${result.scored} scored, ${result.failed} failed`);
     }

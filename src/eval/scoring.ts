@@ -1,7 +1,29 @@
 import type { Ledger } from "../ledger/ledger";
 import type { LlmClient } from "../llm/types";
+import type { SelectionConstants } from "../selection/types";
+import { runAudits } from "./audits";
 import { judgePrompt, passesAll, type Judgment } from "./judge";
 import { AXES } from "./rubric";
+
+/** The spec's Constants section verified defaults (docs/superpowers/specs/
+ * 2026-08-02-ee-synthesis-design.md), duplicated from config.ts's zod
+ * defaults rather than imported: index.ts (owned by another package this
+ * wave) does not yet thread config.selection through to scorePending, so
+ * this poller needs a value to fall back on until that wiring lands. Kept in
+ * lockstep with config.ts's `selection` block by inspection; a caller on a
+ * non-default config should pass its own via ScoringDeps.selectionConstants. */
+const DEFAULT_SELECTION_CONSTANTS: SelectionConstants = {
+  settlingDays: 2,
+  subjectCooldownDays: 14,
+  domainCooldownDays: 4,
+  familyCooldownDays: 7,
+  tokenWindowDays: 3,
+  exploitRunCap: 2,
+  budgetCap: 3,
+  candidateDepth: 8,
+  seedReuseDays: 90,
+  anchorMinSharedWords: 1,
+};
 
 export interface ScoringDeps {
   ledger: Ledger;
@@ -9,6 +31,10 @@ export interface ScoringDeps {
   model: string;
   log: (msg: string) => void;
   now?: () => string;
+  /** Optional so every existing call site (owned by other packages this
+   * wave) keeps compiling without passing it; defaults to the spec's
+   * verified constants when omitted. */
+  selectionConstants?: SelectionConstants;
 }
 
 export interface ScoringResult {
@@ -62,6 +88,26 @@ export async function scorePending(deps: ScoringDeps): Promise<ScoringResult> {
       deps.log(`PROMPT SCORING FAILED for ${row.date}: ${err}`);
       failed++;
     }
+  }
+
+  // Own try/catch, deliberately separate from the scoring loop above: a bug
+  // in audit machinery is observability, not a scoring dependency, and must
+  // never turn a working scoring pass into a failed one (spec "Audits":
+  // "inside the scoring poller's own try/catch").
+  try {
+    const today = now().slice(0, 10);
+    const constants = deps.selectionConstants ?? DEFAULT_SELECTION_CONSTANTS;
+    const violations = runAudits(deps.ledger, today, constants);
+    if (violations.length > 0) {
+      deps.ledger.recordAuditViolations(today, violations, now());
+      for (const v of violations) {
+        deps.log(
+          `AUDIT VIOLATION ${v.audit} person=${v.person ?? "-"} subject=${v.subject ?? "-"}: ${v.detail ?? ""}`,
+        );
+      }
+    }
+  } catch (err) {
+    deps.log(`AUDIT RUN FAILED: ${err}`);
   }
 
   return { scored, failed };

@@ -601,3 +601,114 @@ describe("recent prompt topics", () => {
     expect(ledger.recentTopics("a", 5)).toEqual([]);
   });
 });
+
+describe("dispatch-time lane/seed/domain/family snapshot (2026-08-02 synthesis design)", () => {
+  const dispatch = (
+    date: string,
+    person: "a" | "b",
+    overrides: Partial<{ lane: string | null; seedId: number | null; askDomain: string | null; askFamily: string | null; id: number }> = {},
+  ) => ({
+    date, promptId: `gen-${date}-${person}`, promptText: "q", model: "m",
+    systemPrompt: "s", userPrompt: "u", rawResponse: "{}", rationale: "r",
+    stance: "exploit", person, topic: null, targetNodeId: null, targetDomain: null,
+    fellBack: false, fallbackReason: null, at: "t",
+    lane: overrides.lane ?? "exploit", seedId: overrides.seedId ?? null,
+    askDomain: overrides.askDomain ?? "daily-life", askFamily: overrides.askFamily ?? "food",
+  });
+
+  test("round-trips lane, seedId, askDomain, askFamily", () => {
+    ledger.recordGeneration(dispatch("2026-07-18", "a", { lane: "explore", seedId: 7, askDomain: "childhood", askFamily: "nostalgia" }));
+    const row = ledger.generationLogFor("2026-07-18")[0]!;
+    expect(row).toMatchObject({ lane: "explore", seedId: 7, askDomain: "childhood", askFamily: "nostalgia" });
+  });
+
+  test("the four new fields are optional and default to null, so existing call sites keep compiling", () => {
+    ledger.recordGeneration({
+      date: "2026-07-18", promptId: "p", promptText: "q", model: "m",
+      systemPrompt: "s", userPrompt: "u", rawResponse: "{}", rationale: "r",
+      stance: "exploit", person: "a", topic: null, targetNodeId: null, targetDomain: null,
+      fellBack: false, fallbackReason: null, at: "t",
+    });
+    const row = ledger.generationLogFor("2026-07-18")[0]!;
+    expect(row).toMatchObject({ lane: null, seedId: null, askDomain: null, askFamily: null });
+  });
+
+  test("a database migrated from before these columns existed reads them as null", () => {
+    const path = join(tmpdir(), `daily-prompts-lane-migration-${Date.now()}.db`);
+    try {
+      const old = new Database(path, { create: true, strict: true });
+      old.exec(`CREATE TABLE generation_log (
+        id INTEGER PRIMARY KEY, date TEXT NOT NULL, prompt_id TEXT, prompt_text TEXT,
+        model TEXT, system_prompt TEXT, user_prompt TEXT, raw_response TEXT,
+        rationale TEXT, stance TEXT, person TEXT, topic TEXT,
+        target_node_id INTEGER, target_domain TEXT,
+        fell_back INTEGER NOT NULL DEFAULT 0, fallback_reason TEXT, at TEXT NOT NULL)`);
+      old.exec(`INSERT INTO generation_log (date, prompt_text, person, fell_back, at) VALUES ('2026-07-18', 'pre-lane', 'a', 0, 't')`);
+      old.close();
+
+      const migrated = Ledger.open(path);
+      const row = migrated.generationLogFor("2026-07-18")[0]!;
+      expect(row.promptText).toBe("pre-lane");
+      expect(row).toMatchObject({ lane: null, seedId: null, askDomain: null, askFamily: null });
+    } finally {
+      for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
+    }
+  });
+});
+
+describe("recentAsks", () => {
+  const dispatch = (
+    date: string,
+    person: "a" | "b",
+    opts: Partial<{ fellBack: boolean; askDomain: string | null; askFamily: string | null; lane: string | null }> = {},
+  ) => ({
+    date, promptId: `gen-${date}-${person}`, promptText: "q", model: "m",
+    systemPrompt: "s", userPrompt: "u", rawResponse: "{}", rationale: "r",
+    stance: "exploit", person: opts.fellBack ? null : person, topic: null, targetNodeId: null, targetDomain: null,
+    fellBack: opts.fellBack ?? false, fallbackReason: opts.fellBack ? "outage" : null, at: "t",
+    lane: opts.lane ?? "exploit", seedId: null, askDomain: opts.askDomain ?? "daily-life", askFamily: opts.askFamily ?? "food",
+  });
+
+  test("dedupes to one row per (date, person) by max(id)", () => {
+    ledger.recordGeneration(dispatch("2026-07-18", "a", { askDomain: "childhood" }));
+    ledger.recordGeneration(dispatch("2026-07-18", "a", { askDomain: "daily-life" })); // hotfix duplicate: later id wins
+    const rows = ledger.recentAsks("2026-07-01");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.askDomain).toBe("daily-life");
+  });
+
+  test("excludes fallback rows and rows with no person", () => {
+    ledger.recordGeneration(dispatch("2026-07-18", "a", { fellBack: true }));
+    expect(ledger.recentAsks("2026-07-01")).toEqual([]);
+  });
+
+  test("respects the sinceDate floor", () => {
+    ledger.recordGeneration(dispatch("2026-07-01", "a"));
+    ledger.recordGeneration(dispatch("2026-07-20", "a"));
+    expect(ledger.recentAsks("2026-07-10").map((r) => r.date)).toEqual(["2026-07-20"]);
+  });
+});
+
+describe("audit_log", () => {
+  test("records violations and reads them back since a cutoff date", () => {
+    ledger.recordAuditViolations("2026-07-20", [
+      { audit: "A1", person: "a", subject: "node:5", detail: "asked twice within 14 days" },
+      { audit: "A8", person: null, subject: null, detail: "null-family rate 12%" },
+    ], "t1");
+    const rows = ledger.auditViolationsSince("2026-07-01");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ audit: "A1", person: "a", subject: "node:5" });
+  });
+
+  test("is idempotent on UNIQUE(run_date, audit, person, subject): a rerun does not double-count", () => {
+    const violation = { audit: "A1" as const, person: "a" as const, subject: "node:5", detail: "d" };
+    ledger.recordAuditViolations("2026-07-20", [violation], "t1");
+    ledger.recordAuditViolations("2026-07-20", [violation], "t2");
+    expect(ledger.auditViolationsSince("2026-07-01")).toHaveLength(1);
+  });
+
+  test("auditViolationsSince excludes rows before the cutoff", () => {
+    ledger.recordAuditViolations("2026-07-01", [{ audit: "A2", person: "b", subject: "domain:food", detail: "d" }], "t1");
+    expect(ledger.auditViolationsSince("2026-07-15")).toEqual([]);
+  });
+});

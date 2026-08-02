@@ -85,6 +85,9 @@ describe("extractObservations", () => {
       kind: "fact",
       text: "Enjoys birthday dinners at a favorite restaurant with family.",
       target: { nodeId: 14 },
+      family: null,
+      eventDate: null,
+      alsoAbout: [],
     });
   });
 
@@ -103,7 +106,13 @@ describe("extractObservations", () => {
     const result = await extractObservations(baseInput, client);
     expect(result.facts.length).toBe(1);
     expect(result.facts[0]!.target).toEqual({
-      newNode: { domain: "health-body", subdomain: "back-pain", summary: "Has occasional lower back pain." },
+      newNode: {
+        domain: "health-body",
+        subdomain: "back-pain",
+        summary: "Has occasional lower back pain.",
+        family: null,
+        eventDate: null,
+      },
     });
   });
 
@@ -260,7 +269,13 @@ describe("extractObservations", () => {
       const result = await extractObservations({ ...baseInput, existingNodes: [gymNode] }, client);
       expect(result.facts.length).toBe(1);
       expect(result.facts[0]!.target).toEqual({
-        newNode: { domain: "hobbies-interests", subdomain: "guitar", summary: "Practices guitar toward playing and singing at will." },
+        newNode: {
+          domain: "hobbies-interests",
+          subdomain: "guitar",
+          summary: "Practices guitar toward playing and singing at will.",
+          family: null,
+          eventDate: null,
+        },
       });
     });
 
@@ -301,7 +316,13 @@ describe("extractObservations", () => {
       expect(result.facts.length).toBe(2);
       expect(result.facts[0]!.target).toEqual(result.facts[1]!.target);
       expect(result.facts[0]!.target).toEqual({
-        newNode: { domain: "health-body", subdomain: "back-pain", summary: "Has back pain from bench pressing." },
+        newNode: {
+          domain: "health-body",
+          subdomain: "back-pain",
+          summary: "Has back pain from bench pressing.",
+          family: null,
+          eventDate: null,
+        },
       });
     });
 
@@ -349,7 +370,9 @@ describe("extractObservations", () => {
       const result = await extractObservations(baseInput, client);
       expect(calls).toBe(2);
       expect(result.facts.length).toBe(1);
-      expect(result.facts[0]!.target).toEqual({ newNode: { domain: "hobbies-interests", subdomain: "y", summary: "z" } });
+      expect(result.facts[0]!.target).toEqual({
+        newNode: { domain: "hobbies-interests", subdomain: "y", summary: "z", family: null, eventDate: null },
+      });
     });
 
     test("an invalid domain that persists through the retry is dropped with a loud log, other items kept", async () => {
@@ -476,6 +499,258 @@ describe("extractObservations", () => {
       const { client } = fakeLlm(JSON.stringify({ observations: [], promptIdeas: ["good idea", 42, ""] }));
       const result = await extractObservations({ ...baseInput, feedback: ["x"] }, client);
       expect(result.promptIdeas).toEqual(["good idea"]);
+    });
+  });
+
+  describe("family", () => {
+    test("a valid family passes through untouched on the observation and on newNode", async () => {
+      const { client } = fakeLlm(
+        JSON.stringify({
+          observations: [
+            {
+              type: "thread",
+              text: "Working on a savings plan.",
+              family: "self-improvement",
+              newNode: {
+                domain: "daily-life",
+                subdomain: "savings-plan",
+                summary: "Working on a savings plan.",
+                family: "self-improvement",
+              },
+            },
+          ],
+        }),
+      );
+      const result = await extractObservations(baseInput, client);
+      expect(result.facts[0]!.family).toBe("self-improvement");
+      const target = result.facts[0]!.target as { newNode: { family: string | null } };
+      expect(target.newNode.family).toBe("self-improvement");
+    });
+
+    test("an invalid family triggers one dedicated whole-call retry, and the retry's valid family is used", async () => {
+      let calls = 0;
+      const client: LlmClient = {
+        async complete() {
+          calls++;
+          if (calls === 1) {
+            return JSON.stringify({ observations: [{ type: "fact", text: "x", nodeId: 14, family: "not-a-family" }] });
+          }
+          return JSON.stringify({ observations: [{ type: "fact", text: "x", nodeId: 14, family: "money" }] });
+        },
+      };
+      const result = await extractObservations({ ...baseInput, existingNodes: [gymNode] }, client);
+      expect(calls).toBe(2);
+      expect(result.facts.length).toBe(1);
+      expect(result.facts[0]!.family).toBe("money");
+    });
+
+    test("an invalid family that persists through the retry degrades to null with a loud log, the observation is kept (not dropped)", async () => {
+      const client: LlmClient = {
+        async complete() {
+          return JSON.stringify({ observations: [{ type: "fact", text: "keep me", nodeId: 14, family: "not-a-family" }] });
+        },
+      };
+      const logs: string[] = [];
+      const result = await extractObservations({ ...baseInput, existingNodes: [gymNode] }, client, (m) => logs.push(m));
+      expect(result.facts.length).toBe(1);
+      expect(result.facts[0]!.text).toBe("keep me");
+      expect(result.facts[0]!.family).toBeNull();
+      expect(logs.some((l) => l.includes("not-a-family"))).toBe(true);
+    });
+
+    test("does not spend the family-validation retry when all families are already valid or absent", async () => {
+      let calls = 0;
+      const client: LlmClient = {
+        async complete() {
+          calls++;
+          return JSON.stringify({ observations: [{ type: "fact", text: "x", nodeId: 14 }] });
+        },
+      };
+      await extractObservations({ ...baseInput, existingNodes: [gymNode] }, client);
+      expect(calls).toBe(1);
+    });
+
+    test("a missing family on the observation is null, not an error", async () => {
+      const { client } = fakeLlm(JSON.stringify({ observations: [{ type: "fact", text: "x", nodeId: 14 }] }));
+      const result = await extractObservations({ ...baseInput, existingNodes: [gymNode] }, client);
+      expect(result.facts[0]!.family).toBeNull();
+    });
+
+    test("mood_signal and prompt_preference never carry family even if the model attaches one", async () => {
+      const { client } = fakeLlm(
+        JSON.stringify({ observations: [{ type: "mood_signal", text: "Seems tired.", family: "body" }] }),
+      );
+      const result = await extractObservations(baseInput, client);
+      expect(result.signals).toEqual([{ kind: "mood_signal", text: "Seems tired." }]);
+    });
+  });
+
+  describe("eventDate", () => {
+    test("a resolved absolute eventDate on an observation citing an existing nodeId passes through", async () => {
+      const { client } = fakeLlm(
+        JSON.stringify({
+          observations: [{ type: "thread", text: "Has a follow-up on 2026-08-15.", nodeId: 14, eventDate: "2026-08-15" }],
+        }),
+      );
+      const result = await extractObservations({ ...baseInput, existingNodes: [gymNode] }, client);
+      expect(result.facts[0]!.eventDate).toBe("2026-08-15");
+    });
+
+    test("eventDate on a newNode is carried onto the fact even when the observation itself omits it", async () => {
+      const { client } = fakeLlm(
+        JSON.stringify({
+          observations: [
+            {
+              type: "thread",
+              text: "Birthday dinner planned.",
+              newNode: { domain: "family", subdomain: "birthday-dinner", summary: "A birthday dinner tradition.", eventDate: "2026-08-15" },
+            },
+          ],
+        }),
+      );
+      const result = await extractObservations(baseInput, client);
+      expect(result.facts[0]!.eventDate).toBe("2026-08-15");
+      const target = result.facts[0]!.target as { newNode: { eventDate: string | null } };
+      expect(target.newNode.eventDate).toBe("2026-08-15");
+    });
+
+    test("no eventDate is null, not undefined or an error", async () => {
+      const { client } = fakeLlm(JSON.stringify({ observations: [{ type: "fact", text: "x", nodeId: 14 }] }));
+      const result = await extractObservations({ ...baseInput, existingNodes: [gymNode] }, client);
+      expect(result.facts[0]!.eventDate).toBeNull();
+    });
+
+    test("mood_signal and prompt_preference never carry eventDate even if the model attaches one", async () => {
+      const { client } = fakeLlm(
+        JSON.stringify({ observations: [{ type: "mood_signal", text: "Seems tired.", eventDate: "2026-08-15" }] }),
+      );
+      const result = await extractObservations(baseInput, client);
+      expect(result.signals).toEqual([{ kind: "mood_signal", text: "Seems tired." }]);
+    });
+  });
+
+  describe("alsoAbout", () => {
+    const primaryNode: ExistingNode = { id: 20, domain: "family", subdomain: "cora", summary: "A close friend, Cora." };
+
+    test("a fact citing 0-2 additional subjects files them as alsoAbout targets, resolved the same way as the primary target", async () => {
+      const { client } = fakeLlm(
+        JSON.stringify({
+          observations: [
+            {
+              type: "fact",
+              text: "A psychic read Cora's palm at the party and mentioned the car.",
+              nodeId: 20,
+              alsoAbout: [
+                { newNode: { domain: "hobbies-interests", subdomain: "psychic-readings", summary: "Enjoys psychic readings." } },
+                { newNode: { domain: "daily-life", subdomain: "car", summary: "Owns a car." } },
+              ],
+            },
+          ],
+        }),
+      );
+      const result = await extractObservations({ ...baseInput, existingNodes: [primaryNode] }, client);
+      expect(result.facts.length).toBe(1);
+      expect(result.facts[0]!.target).toEqual({ nodeId: 20 });
+      expect(result.facts[0]!.alsoAbout.length).toBe(2);
+      // normalizeSubdomain collapses a trailing plural s ("readings" ->
+      // "reading"), the same rule every other node's subdomain goes through.
+      const subdomains = result.facts[0]!.alsoAbout.map((t) => ("newNode" in t ? t.newNode.subdomain : null));
+      expect(subdomains).toEqual(["psychic-reading", "car"]);
+    });
+
+    test("an alsoAbout entry that resolves to the same node as the primary target is deduped away", async () => {
+      const { client } = fakeLlm(
+        JSON.stringify({
+          observations: [
+            {
+              type: "fact",
+              text: "x",
+              nodeId: 20,
+              alsoAbout: [{ nodeId: 20 }],
+            },
+          ],
+        }),
+      );
+      const result = await extractObservations({ ...baseInput, existingNodes: [primaryNode] }, client);
+      expect(result.facts[0]!.alsoAbout).toEqual([]);
+    });
+
+    test("duplicate alsoAbout entries naming the same new subject collapse into one", async () => {
+      const { client } = fakeLlm(
+        JSON.stringify({
+          observations: [
+            {
+              type: "fact",
+              text: "x",
+              nodeId: 20,
+              alsoAbout: [
+                { newNode: { domain: "daily-life", subdomain: "car", summary: "Owns a car." } },
+                { newNode: { domain: "daily-life", subdomain: "Car", summary: "Owns a car that needs work." } },
+              ],
+            },
+          ],
+        }),
+      );
+      const result = await extractObservations({ ...baseInput, existingNodes: [primaryNode] }, client);
+      expect(result.facts[0]!.alsoAbout.length).toBe(1);
+    });
+
+    test("more than 2 alsoAbout entries are truncated to 2 with a loud log, the fact is kept", async () => {
+      const { client } = fakeLlm(
+        JSON.stringify({
+          observations: [
+            {
+              type: "fact",
+              text: "keep me",
+              nodeId: 20,
+              alsoAbout: [
+                { newNode: { domain: "daily-life", subdomain: "woodworking", summary: "Builds furniture as a hobby." } },
+                { newNode: { domain: "hobbies-interests", subdomain: "chess", summary: "Plays chess competitively." } },
+                { newNode: { domain: "daily-life", subdomain: "gardening", summary: "Tends a small vegetable garden." } },
+              ],
+            },
+          ],
+        }),
+      );
+      const logs: string[] = [];
+      const result = await extractObservations({ ...baseInput, existingNodes: [primaryNode] }, client, (m) => logs.push(m));
+      expect(result.facts.length).toBe(1);
+      expect(result.facts[0]!.text).toBe("keep me");
+      expect(result.facts[0]!.alsoAbout.length).toBe(2);
+      expect(logs.some((l) => l.includes("truncating"))).toBe(true);
+    });
+
+    test("an alsoAbout entry with an unknown nodeId is dropped, other alsoAbout entries and the fact itself are kept", async () => {
+      const { client } = fakeLlm(
+        JSON.stringify({
+          observations: [
+            {
+              type: "fact",
+              text: "x",
+              nodeId: 20,
+              alsoAbout: [{ nodeId: 999 }, { newNode: { domain: "daily-life", subdomain: "car", summary: "Owns a car." } }],
+            },
+          ],
+        }),
+      );
+      const result = await extractObservations({ ...baseInput, existingNodes: [primaryNode] }, client);
+      expect(result.facts[0]!.alsoAbout.length).toBe(1);
+    });
+
+    test("no alsoAbout on an observation is an empty array, not undefined", async () => {
+      const { client } = fakeLlm(JSON.stringify({ observations: [{ type: "fact", text: "x", nodeId: 14 }] }));
+      const result = await extractObservations({ ...baseInput, existingNodes: [gymNode] }, client);
+      expect(result.facts[0]!.alsoAbout).toEqual([]);
+    });
+
+    test("mood_signal and prompt_preference never carry alsoAbout even if the model attaches one", async () => {
+      const { client } = fakeLlm(
+        JSON.stringify({
+          observations: [{ type: "mood_signal", text: "Seems tired.", alsoAbout: [{ nodeId: 14 }] }],
+        }),
+      );
+      const result = await extractObservations({ ...baseInput, existingNodes: [gymNode] }, client);
+      expect(result.signals).toEqual([{ kind: "mood_signal", text: "Seems tired." }]);
     });
   });
 });

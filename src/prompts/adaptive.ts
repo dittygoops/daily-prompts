@@ -2,38 +2,54 @@ import { z } from "zod";
 import type { PersonId } from "../config";
 import type { Ledger } from "../ledger/ledger";
 import type { LlmClient } from "../llm/types";
-import type { OntologyView } from "../ontology/types";
-import type { NodeDomain } from "../ledger/ledger";
+import type { Candidate, Lane, Selection, SelectionConstants, SelectionInput } from "../selection/types";
 import { addDays } from "../scheduler";
 import { recentFeedbackByPerson } from "./feedback";
-import { ADAPTIVE_SYSTEM_PROMPT, buildGenerationUserPrompt } from "./generationPrompt";
+import {
+  ADAPTIVE_SYSTEM_PROMPT,
+  buildGenerationUserPrompt,
+  type AssignedNodeTarget,
+  type AssignedTarget,
+  type WriterPersonInput,
+} from "./generationPrompt";
 import { recentPromptHistory } from "./history";
-import { decideStance, stanceForPerson, type Stance } from "./stance";
 import { NEAR_DUPLICATE_THRESHOLD, nearestPrior, openingStem } from "../eval/novelty";
 import type { DailyPrompts, PromptSource } from "./types";
+
+/** The selection module's public surface this package depends on. Injected
+ * rather than imported directly from src/selection's implementation files:
+ * those (buildSelectionInput, selectPair, the anchor check) are owned by a
+ * different package this wave and this file must not touch them, only their
+ * fixed shapes in src/selection/types.ts. buildSelectionInput/selectPair are
+ * pure functions of (ledger state, date) per the spec, so a caller wires the
+ * real module's exports here in production and a fake in tests. */
+export interface SelectionDeps {
+  buildSelectionInput(date: string): SelectionInput;
+  selectPair(input: SelectionInput): Selection;
+  /** Spec "the writer's contract": the written question must share at least
+   * one content word with its target node's subdomain, summary, or facts
+   * (deterministic, reuses contentWords). Seeds are anchored by
+   * construction and never passed here. */
+  checkAnchor(promptText: string, target: AssignedNodeTarget, minSharedWords: number): boolean;
+}
 
 export interface AdaptivePromptSourceOptions {
   model: string;
   historyWindowDays: number;
   feedbackWindowDays: number;
-  contextBudgetChars: number;
   names: Record<PersonId, string>;
+  constants: SelectionConstants;
 }
 
 const personSchema = z.object({
   prompt: z.string().min(1).max(300),
-  // Required, not optional: forcing the generator to commit to a stance is
-  // the mechanism that makes the explore/exploit ratio measurable at all.
-  stance: z.enum(["explore", "exploit"]),
-  // Declared so a topical repeat can be rejected in code. Content-word
-  // similarity cannot see that "get better at" and "area of growth" are the
-  // same subject, and four such questions went out in six days.
-  topic: z.string().min(1).max(60),
-  // Exactly one of these matches the assigned stance: the exploit target is
-  // a node id from the offered candidate list, the explore target one of the
-  // offered domains. Validated in code; a miss is a rejected generation.
+  // Exactly one of these matches the assigned target, by strict equality
+  // against the Candidate selectPair produced (spec "the writer's
+  // contract"): a node id for lanes followup/exploit, a seed id for lane
+  // explore. A miss is a rejected generation; a FINAL-attempt miss throws
+  // rather than shipping unattributed (impl decision 3).
   targetNodeId: z.number().int().nullable(),
-  targetExplore: z.string().min(1).max(40).nullable(),
+  seedId: z.number().int().nullable(),
 });
 
 const responseSchema = z.object({
@@ -44,89 +60,140 @@ const responseSchema = z.object({
   usedIdeaId: z.number().nullable().optional(),
 });
 
-// Four rejection reasons (near-duplicate text, repeated subject, reused
-// sentence frame, invalid declared target), so the budget rises with them.
+// Rejection reasons this loop can hit: JSON parse, schema shape, strict
+// target mismatch, an anchor miss, a near-duplicate text, a reused opening
+// frame, a repeated theme. Four attempts gives every guard a real second
+// try without letting a stuck generation burn the LLM budget unbounded.
 const MAX_ATTEMPTS = 4;
-
-/** How many of a person's recent subjects are off-limits. Six days of
- * self-improvement questions is what this exists to prevent. */
-const TOPIC_MEMORY_DAYS = 6;
 
 /** How many recent questions the opening-frame check looks back over. */
 const STEM_MEMORY_DAYS = 3;
 
-const norm = (t: string) => t.trim().toLowerCase();
+/** How many recent days' shared angles the theme-repeat guard checks
+ * against. Matches the old topic-repeat guard's window; that guard itself
+ * is gone (selection's W2-W4 windows now own subject non-repeat), but the
+ * day-level theme is still the model's own free text and still repeats. */
+const THEME_MEMORY_DAYS = 6;
 
-/** Generates the day's two prompts, one per person, from one LLM call over
- * both people's memory context, coverage, recent history, and
- * feedback/prompt ideas. Throws on any failure (LLM outage, malformed
- * response, memory backend down) rather than degrading itself, the caller
- * (FallbackPromptSource) is what degrades. Never calls itself "the
- * fallback"; it has none. */
+/** `stance` stays the two-value exploit/explore label recorded to
+ * generation_log for backward compatibility (impl decision 4: the
+ * finer-grained truth lives in `lane`, which W5's exploit-run cap reads). */
+const laneStance = (lane: Lane): "explore" | "exploit" => (lane === "explore" ? "explore" : "exploit");
+
+function nodeTargetFrom(
+  ledger: Ledger,
+  id: number,
+  domain: string,
+  family: string | null,
+  subdomain: string,
+  summary: string,
+): AssignedNodeTarget {
+  const facts = ledger.nodeFactsFor(id).map((f) => ({ date: f.observedDate, kind: f.kind, text: f.text }));
+  return { kind: "node", id, domain, family, subdomain, summary, facts };
+}
+
+/** Builds one person's ASSIGNED TARGET from their Candidate. A followup
+ * (lane 0) candidate carries only a token, not a SelectableNode (Candidate's
+ * own contract: exactly one of node/seed/token is non-null); the token's
+ * target IS a node, just gated by the token rather than budget, so its facts
+ * are read straight from the ledger by the token's nodeId. */
+function assignedTargetFor(ledger: Ledger, person: PersonId, candidate: Candidate): AssignedTarget {
+  if (candidate.node !== null) {
+    const n = candidate.node;
+    return nodeTargetFrom(ledger, n.id, n.domain, n.family, n.subdomain, n.summary);
+  }
+  if (candidate.token !== null) {
+    const node = ledger.nodesFor(person).find((n) => n.id === candidate.token!.nodeId);
+    if (!node) {
+      throw new Error(
+        `AdaptivePromptSource: followup token ${candidate.token.id} references missing node ${candidate.token.nodeId}`,
+      );
+    }
+    return nodeTargetFrom(ledger, node.id, node.domain, node.family, node.subdomain, node.summary);
+  }
+  if (candidate.seed !== null) {
+    return { kind: "seed", id: candidate.seed.id, domain: candidate.seed.domain, family: candidate.seed.family, text: candidate.seed.text };
+  }
+  // A well-formed Selection always carries one of node/seed/token; a
+  // selector bug that ships none is a loud failure here, not a silent null
+  // reaching the writer.
+  throw new Error(`AdaptivePromptSource: candidate for ${person} carries neither node, token, nor seed`);
+}
+
+/** The node id a candidate's declared targetNodeId must strictly equal, for
+ * lanes followup/exploit (both target a node; only the eligibility gate
+ * differs). Null for lane explore, where the target is a seed instead. */
+function expectedNodeId(candidate: Candidate): number | null {
+  return candidate.node?.id ?? candidate.token?.nodeId ?? null;
+}
+
+/** Generates the day's two prompts, one per person, from one LLM call: code
+ * (selectPair) already chose each person's subject, so the model only
+ * writes the sentence and echoes back which target it wrote for. Throws on
+ * any failure (LLM outage, malformed response, a final-attempt target
+ * mismatch) rather than degrading itself; the caller (FallbackPromptSource)
+ * is what degrades. Never calls itself "the fallback"; it has none. */
 export class AdaptivePromptSource implements PromptSource {
   constructor(
-    private readonly ontology: OntologyView,
+    private readonly selection: SelectionDeps,
     private readonly llm: LlmClient,
     private readonly ledger: Ledger,
     private readonly opts: AdaptivePromptSourceOptions,
   ) {}
 
   async nextPrompts(date: string): Promise<DailyPrompts> {
-    const feedbackWindowStart = addDays(date, -this.opts.feedbackWindowDays);
+    const selectionInput = this.selection.buildSelectionInput(date);
+    const sel = this.selection.selectPair(selectionInput);
 
-    const candidatesA = this.ontology.candidates("a", date);
-    const candidatesB = this.ontology.candidates("b", date);
+    const feedbackWindowStart = addDays(date, -this.opts.feedbackWindowDays);
     const moodsA = this.ledger.recentSignals("a", "mood_signal", 7, date).map((s) => `[${s.observedDate}] ${s.text}`);
     const moodsB = this.ledger.recentSignals("b", "mood_signal", 7, date).map((s) => `[${s.observedDate}] ${s.text}`);
     const prefsA = this.ledger.recentSignals("a", "prompt_preference", null, date).map((s) => s.text);
     const prefsB = this.ledger.recentSignals("b", "prompt_preference", null, date).map((s) => s.text);
-
-    const history = recentPromptHistory(this.ledger, date, this.opts.historyWindowDays);
     const feedback = recentFeedbackByPerson(this.ledger, feedbackWindowStart);
     const ideasA = this.ledger.unconsumedPromptIdeas("a").map((i) => ({ id: i.id, text: i.text }));
     const ideasB = this.ledger.unconsumedPromptIdeas("b").map((i) => ({ id: i.id, text: i.text }));
 
-    // "Has threads" is now exact where it used to be approximate: a person
-    // can be exploited precisely when they have at least one eligible
-    // exploit candidate, which the old signal only gestured at.
-    const dayStance = decideStance({
-      recentStances: history.map((h) => h.stance),
-      hasThreads: candidatesA.exploit.length > 0 || candidatesB.exploit.length > 0,
-    });
-    const stanceA: Stance = stanceForPerson(dayStance, candidatesA.exploit.length > 0);
-    const stanceB: Stance = stanceForPerson(dayStance, candidatesB.exploit.length > 0);
+    const history = recentPromptHistory(this.ledger, date, this.opts.historyWindowDays);
+    const recentThemes = this.ledger.recentThemes(THEME_MEMORY_DAYS);
 
-    const recentThemes = this.ledger.recentThemes(TOPIC_MEMORY_DAYS);
-    const recentTopicsA = this.ledger.recentTopics("a", TOPIC_MEMORY_DAYS);
-    const recentTopicsB = this.ledger.recentTopics("b", TOPIC_MEMORY_DAYS);
+    const targetA = assignedTargetFor(this.ledger, "a", sel.a);
+    const targetB = assignedTargetFor(this.ledger, "b", sel.b);
+
+    const writerA: WriterPersonInput = {
+      name: this.opts.names.a,
+      lane: sel.a.lane,
+      target: targetA,
+      background: sel.background.a,
+      moods: moodsA,
+      prefs: prefsA,
+      feedback: feedback.a,
+      ideas: ideasA,
+    };
+    const writerB: WriterPersonInput = {
+      name: this.opts.names.b,
+      lane: sel.b.lane,
+      target: targetB,
+      background: sel.background.b,
+      moods: moodsB,
+      prefs: prefsB,
+      feedback: feedback.b,
+      ideas: ideasB,
+    };
 
     const userPrompt = buildGenerationUserPrompt({
       today: date,
-      stanceA,
-      stanceB,
-      names: this.opts.names,
-      candidatesA,
-      candidatesB,
-      moodsA,
-      moodsB,
-      prefsA,
-      prefsB,
+      a: writerA,
+      b: writerB,
       history,
-      feedbackA: feedback.a,
-      feedbackB: feedback.b,
-      ideasA,
-      ideasB,
-      recentTopicsA,
-      recentTopicsB,
       recentThemes,
     });
 
     let lastError: Error | null = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       // A blind retry reuses the identical prompt and hopes sampling saves
-      // it; observed live, the model missed target validation four times in
-      // a row citing the same unoffered domain. Telling it why it was
-      // rejected is what makes a retry better than a reroll.
+      // it; telling the model why it was rejected is what makes a retry
+      // better than a reroll.
       const attemptPrompt =
         lastError === null
           ? userPrompt
@@ -146,55 +213,68 @@ export class AdaptivePromptSource implements PromptSource {
         continue;
       }
 
-      // Declared-target validation: the single check that makes the whole
-      // ontology enforceable, and it is a Set lookup. On the FINAL attempt a
-      // target miss ships the question with null targets and a loud log
-      // rather than blocking dispatch: the question itself is probably fine,
-      // the bookkeeping just notes it was unattributed. Wording guards below
-      // keep their existing final-attempt bypass.
+      // Strict-equality target validation. This is THE enforceable link
+      // between what code assigned and what the model wrote: a Set-free
+      // exact match, not a fuzzy one. On the FINAL attempt a mismatch
+      // throws (impl decision 3), replacing the old ship-unattributed path:
+      // an unattributed ask corrupts every downstream window (W1-W5, the
+      // audits), which is worse than losing the day to the static bank.
       const validateTarget = (
         person: "a" | "b",
-        stance: Stance,
-        decl: { targetNodeId: number | null; targetExplore: string | null },
-        offered: { exploit: Set<number>; explore: Set<string> },
+        candidate: Candidate,
+        decl: { targetNodeId: number | null; seedId: number | null },
       ): string | null => {
-        if (stance === "exploit") {
-          if (decl.targetNodeId === null || !offered.exploit.has(decl.targetNodeId)) {
-            return `person ${person} exploit target ${decl.targetNodeId} is not an offered candidate`;
+        if (candidate.lane === "explore") {
+          if (candidate.seed === null) return `person ${person} explore candidate carries no seed (selector bug)`;
+          if (decl.seedId !== candidate.seed.id) {
+            return `person ${person} declared seedId ${decl.seedId}, assigned target is seed ${candidate.seed.id}`;
           }
-          if (decl.targetExplore !== null) return `person ${person} declared both targets`;
+          if (decl.targetNodeId !== null) return `person ${person} declared both targetNodeId and seedId`;
         } else {
-          if (decl.targetExplore === null || !offered.explore.has(decl.targetExplore)) {
-            return `person ${person} explore target "${decl.targetExplore}" is not an offered domain`;
+          const expected = expectedNodeId(candidate);
+          if (expected === null) return `person ${person} ${candidate.lane} candidate carries no node (selector bug)`;
+          if (decl.targetNodeId !== expected) {
+            return `person ${person} declared targetNodeId ${decl.targetNodeId}, assigned target is node ${expected}`;
           }
-          if (decl.targetNodeId !== null) return `person ${person} declared both targets`;
+          if (decl.seedId !== null) return `person ${person} declared both targetNodeId and seedId`;
         }
         return null;
       };
-      const offeredA = { exploit: new Set(candidatesA.exploit.map((n) => n.id)), explore: new Set<string>(candidatesA.explore) };
-      const offeredB = { exploit: new Set(candidatesB.exploit.map((n) => n.id)), explore: new Set<string>(candidatesB.explore) };
-      // A person whose exploit list is empty was downgraded to explore by
-      // stanceForPerson, so validation always checks against a real list.
-      const targetErrA = validateTarget("a", stanceA, shaped.data.a, offeredA);
-      const targetErrB = validateTarget("b", stanceB, shaped.data.b, offeredB);
-      if ((targetErrA || targetErrB) && attempt < MAX_ATTEMPTS) {
-        lastError = new Error(`AdaptivePromptSource: ${targetErrA ?? targetErrB}`);
-        continue;
+      const targetErrA = validateTarget("a", sel.a, shaped.data.a);
+      const targetErrB = validateTarget("b", sel.b, shaped.data.b);
+      if (targetErrA !== null || targetErrB !== null) {
+        if (attempt < MAX_ATTEMPTS) {
+          lastError = new Error(`AdaptivePromptSource: ${targetErrA ?? targetErrB}`);
+          continue;
+        }
+        throw new Error(
+          `AdaptivePromptSource: FINAL-attempt target mismatch, refusing to ship unattributed: ${targetErrA ?? targetErrB}`,
+        );
       }
-      // Validity is per person on the final attempt: one person miscited a
-      // target does not discard the other's perfectly good attribution.
-      const validA = targetErrA === null;
-      const validB = targetErrB === null;
-      if (!validA || !validB) {
-        // eslint-disable-next-line no-console
-        console.error(`[adaptive] FINAL-ATTEMPT target miss, shipping unattributed: ${targetErrA ?? targetErrB}`);
+
+      // Anchor check (spec F12, restored): a followup/exploit question must
+      // share at least one content word with its target's subdomain,
+      // summary, or facts, the structural guard against altitude retreat on
+      // exploit days. Seeds are anchored by construction and skipped. A
+      // failure retries like any wording guard below (no final-attempt
+      // exception, unlike the target check above): the question still ships
+      // on the final attempt, just without this guard's blessing.
+      const anchorFails = (candidate: Candidate, target: AssignedTarget, prompt: string): boolean =>
+        candidate.lane !== "explore" &&
+        target.kind === "node" &&
+        !this.selection.checkAnchor(prompt, target, this.opts.constants.anchorMinSharedWords);
+      const anchorFailA = anchorFails(sel.a, targetA, shaped.data.a.prompt);
+      const anchorFailB = anchorFails(sel.b, targetB, shaped.data.b.prompt);
+      if ((anchorFailA || anchorFailB) && attempt < MAX_ATTEMPTS) {
+        lastError = new Error(
+          `AdaptivePromptSource: person ${anchorFailA ? "A" : "B"}'s question shares no content word with its assigned target`,
+        );
+        continue;
       }
 
       // Deterministic repeat guard, per person, since each now has their
-      // own history. The system prompt already forbids repeats and the
-      // history is right there in the context, and the generator still
-      // reproduced a prompt from six days earlier almost verbatim. Retrying
-      // costs one call; shipping a duplicate is visible to that person.
+      // own history. Retrying costs one call; shipping a duplicate is
+      // visible to that person.
       const priorTextsA = history.map((h) => h.a.text);
       const priorTextsB = history.map((h) => h.b.text);
       const nearestA = nearestPrior(shaped.data.a.prompt, priorTextsA);
@@ -209,21 +289,9 @@ export class AdaptivePromptSource implements PromptSource {
         continue;
       }
 
-      // Subject repeat. Jaccard is blind to this: four self-improvement
-      // questions went out in six days sharing almost no vocabulary.
-      const repeatedTopic =
-        (recentTopicsA.some((t) => norm(t) === norm(shaped.data.a.topic)) && { person: "A", topic: shaped.data.a.topic }) ||
-        (recentTopicsB.some((t) => norm(t) === norm(shaped.data.b.topic)) && { person: "B", topic: shaped.data.b.topic });
-      if (repeatedTopic && attempt < MAX_ATTEMPTS) {
-        lastError = new Error(
-          `AdaptivePromptSource: person ${repeatedTopic.person}'s topic "${repeatedTopic.topic}" was used in the last ${TOPIC_MEMORY_DAYS} questions`,
-        );
-        continue;
-      }
-
-      // Repeated shared angle. The per-person topic tags can all differ
-      // while the day is about the same thing three days running, so the
-      // repetition moves up a level into the theme.
+      // Repeated shared angle. The two per-person targets can be entirely
+      // different subjects while the day's declared theme repeats a recent
+      // one almost verbatim.
       const themeText = shaped.data.theme ?? null;
       const nearestTheme = themeText ? nearestPrior(themeText, recentThemes) : null;
       if (nearestTheme && nearestTheme.similarity >= NEAR_DUPLICATE_THRESHOLD && attempt < MAX_ATTEMPTS) {
@@ -234,12 +302,7 @@ export class AdaptivePromptSource implements PromptSource {
       }
 
       // Reused sentence frame. openingStem exists precisely because
-      // content-word overlap cannot see shared scaffolding, but until now it
-      // only ran in the offline report, never at generation time. Eight of
-      // nine live questions opened "What's a/an/one...".
-      // Wrapped, not passed by reference: map supplies the index as the
-      // second argument, which openingStem reads as stemWords, so
-      // .map(openingStem) silently makes the first stem empty.
+      // content-word overlap cannot see shared scaffolding.
       const recentStemsA = priorTextsA.slice(0, STEM_MEMORY_DAYS).map((t) => openingStem(t));
       const recentStemsB = priorTextsB.slice(0, STEM_MEMORY_DAYS).map((t) => openingStem(t));
       const stemA = openingStem(shaped.data.a.prompt);
@@ -257,48 +320,66 @@ export class AdaptivePromptSource implements PromptSource {
 
       const at = new Date().toISOString();
       const theme = shaped.data.theme ?? null;
-      this.ledger.recordGeneration({
-        date,
-        promptId: `gen-${date}-a`,
-        promptText: shaped.data.a.prompt,
-        model: this.opts.model,
-        systemPrompt: ADAPTIVE_SYSTEM_PROMPT,
-        userPrompt,
-        rawResponse: raw,
-        rationale: shaped.data.rationale,
-        stance: stanceA,
-        topic: shaped.data.a.topic,
-        targetNodeId: validA ? shaped.data.a.targetNodeId : null,
-        targetDomain: validA ? shaped.data.a.targetExplore : null,
-        person: "a",
-        fellBack: false,
-        fallbackReason: null,
-        at,
-      });
-      this.ledger.recordGeneration({
-        date,
-        promptId: `gen-${date}-b`,
-        promptText: shaped.data.b.prompt,
-        model: this.opts.model,
-        systemPrompt: ADAPTIVE_SYSTEM_PROMPT,
-        userPrompt,
-        rawResponse: raw,
-        rationale: shaped.data.rationale,
-        stance: stanceB,
-        topic: shaped.data.b.topic,
-        targetNodeId: validB ? shaped.data.b.targetNodeId : null,
-        targetDomain: validB ? shaped.data.b.targetExplore : null,
-        person: "b",
-        fellBack: false,
-        fallbackReason: null,
-        at,
-      });
 
-      // last_asked moves at dispatch: a question that went out must not
-      // repeat even if it is never answered. times_asked and yield move at
-      // finalization, together, so the count never drifts ahead of the mean.
-      if (validA && shaped.data.a.targetNodeId !== null) this.ledger.recordAsked(shaped.data.a.targetNodeId, date, at);
-      if (validB && shaped.data.b.targetNodeId !== null) this.ledger.recordAsked(shaped.data.b.targetNodeId, date, at);
+      // One transaction where possible (spec deliverable): both people's
+      // generation_log rows plus whichever budget/token write their lane
+      // requires commit together, so a crash mid-write never leaves one
+      // person's ask recorded without its bookkeeping.
+      this.ledger.transaction(() => {
+        this.ledger.recordGeneration({
+          date,
+          promptId: `gen-${date}-a`,
+          promptText: shaped.data.a.prompt,
+          model: this.opts.model,
+          systemPrompt: ADAPTIVE_SYSTEM_PROMPT,
+          userPrompt,
+          rawResponse: raw,
+          rationale: shaped.data.rationale,
+          stance: laneStance(sel.a.lane),
+          topic: null,
+          targetNodeId: sel.a.lane === "explore" ? null : expectedNodeId(sel.a),
+          targetDomain: null,
+          person: "a",
+          fellBack: false,
+          fallbackReason: null,
+          at,
+          lane: sel.a.lane,
+          seedId: sel.a.lane === "explore" ? (sel.a.seed?.id ?? null) : null,
+          askDomain: sel.a.domain,
+          askFamily: sel.a.family,
+        });
+        this.ledger.recordGeneration({
+          date,
+          promptId: `gen-${date}-b`,
+          promptText: shaped.data.b.prompt,
+          model: this.opts.model,
+          systemPrompt: ADAPTIVE_SYSTEM_PROMPT,
+          userPrompt,
+          rawResponse: raw,
+          rationale: shaped.data.rationale,
+          stance: laneStance(sel.b.lane),
+          topic: null,
+          targetNodeId: sel.b.lane === "explore" ? null : expectedNodeId(sel.b),
+          targetDomain: null,
+          person: "b",
+          fellBack: false,
+          fallbackReason: null,
+          at,
+          lane: sel.b.lane,
+          seedId: sel.b.lane === "explore" ? (sel.b.seed?.id ?? null) : null,
+          askDomain: sel.b.domain,
+          askFamily: sel.b.family,
+        });
+
+        // recordAsk for lane-1 (exploit) targets only: a token ask (lane 0)
+        // bypasses budget entirely per spec, so it must never decrement it.
+        if (sel.a.lane === "exploit" && sel.a.node !== null) this.ledger.recordAsk(sel.a.node.id, date, at);
+        if (sel.b.lane === "exploit" && sel.b.node !== null) this.ledger.recordAsk(sel.b.node.id, date, at);
+        // spendToken for lane-0 (followup) targets: spend = spent_at in the
+        // ask's own transaction (spec).
+        if (sel.a.lane === "followup" && sel.a.token !== null) this.ledger.spendToken(sel.a.token.id, at);
+        if (sel.b.lane === "followup" && sel.b.token !== null) this.ledger.spendToken(sel.b.token.id, at);
+      });
 
       const usedId = shaped.data.usedIdeaId;
       if (usedId != null) {

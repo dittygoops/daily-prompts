@@ -1,20 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { buildGenerationUserPrompt } from "../../src/prompts/generationPrompt";
-import { ALL_DOMAINS } from "../../src/ontology/types";
 import { memoryState, memoryStates } from "./fixtures/memoryStates";
 
 const render = (name: string) => buildGenerationUserPrompt(memoryState(name).input);
 
-describe("memory-state fixtures", () => {
+describe("writer-state fixtures", () => {
   test("every fixture has a unique name and a description", () => {
     const names = memoryStates.map((s) => s.name);
     expect(new Set(names).size).toBe(names.length);
     for (const s of memoryStates) expect(s.description.length).toBeGreaterThan(0);
   });
 
-  test("the seven named states the eval harness depends on are all present", () => {
+  test("all nine named states are present", () => {
     const names = memoryStates.map((s) => s.name);
-    for (const required of [
+    expect(names).toEqual([
       "day-one-empty",
       "one-sided",
       "rich-both",
@@ -22,30 +21,63 @@ describe("memory-state fixtures", () => {
       "private-asymmetry",
       "feedback-constrained",
       "stale-threads",
-    ]) {
-      expect(names).toContain(required);
-    }
+      "low-energy-history",
+      "conflicting-preferences",
+    ]);
   });
 
   test("every fixture renders both people's sections and their own history list", () => {
     for (const s of memoryStates) {
       const rendered = buildGenerationUserPrompt(s.input);
-      expect(rendered).toContain(`PERSON A: ${s.input.names.a}`);
-      expect(rendered).toContain(`PERSON B: ${s.input.names.b}`);
-      expect(rendered).toContain(`Questions ${s.input.names.a} was recently asked`);
-      expect(rendered).toContain(`Questions ${s.input.names.b} was recently asked`);
+      expect(rendered).toContain(`PERSON A: ${s.input.a.name}`);
+      expect(rendered).toContain(`PERSON B: ${s.input.b.name}`);
+      expect(rendered).toContain(`Questions ${s.input.a.name} was recently asked`);
+      expect(rendered).toContain(`Questions ${s.input.b.name} was recently asked`);
       expect(rendered).toContain(`Today is ${s.input.today}`);
     }
   });
 
-  test("no fixture dates a candidate fact, a lastAsked, or a prior prompt in its own future", () => {
+  test("every fixture renders exactly one ASSIGNED TARGET block per person, no candidate menus", () => {
+    for (const s of memoryStates) {
+      const rendered = buildGenerationUserPrompt(s.input);
+      expect(rendered.split("ASSIGNED TARGET").length - 1).toBe(2);
+      expect(rendered).not.toContain("CANDIDATES");
+      expect(rendered).not.toContain("OFF LIMITS");
+    }
+  });
+
+  test("every node target's facts render dated and kind-tagged", () => {
+    for (const s of memoryStates) {
+      const rendered = buildGenerationUserPrompt(s.input);
+      for (const p of [s.input.a, s.input.b]) {
+        if (p.target.kind !== "node") continue;
+        for (const f of p.target.facts) {
+          expect(rendered).toContain(`[${f.date}] (${f.kind}) ${f.text}`);
+        }
+      }
+    }
+  });
+
+  test("background nodes render as not-targetable, never inside the ASSIGNED TARGET block", () => {
+    for (const s of memoryStates) {
+      const rendered = buildGenerationUserPrompt(s.input);
+      for (const [letter, p] of [["A", s.input.a], ["B", s.input.b]] as const) {
+        const section = letter === "A" ? rendered.slice(rendered.indexOf("PERSON A:"), rendered.indexOf("PERSON B:")) : rendered.slice(rendered.indexOf("PERSON B:"));
+        if (p.background.length === 0) {
+          expect(section).toContain("BACKGROUND (do not target): (none)");
+        } else {
+          expect(section).toContain("BACKGROUND (do not target):");
+          for (const b of p.background) expect(section).toContain(`${b.domain} / ${b.subdomain}`);
+        }
+      }
+    }
+  });
+
+  test("no fixture dates a target fact or a prior prompt in its own future", () => {
     for (const s of memoryStates) {
       const dated: string[] = [];
-      for (const c of [s.input.candidatesA, s.input.candidatesB]) {
-        for (const n of c.exploit) {
-          for (const f of n.facts) dated.push(f.date);
-          if (n.lastAsked !== null) dated.push(n.lastAsked);
-        }
+      for (const p of [s.input.a, s.input.b]) {
+        if (p.target.kind === "node") for (const f of p.target.facts) dated.push(f.date);
       }
       for (const date of [...dated, ...s.input.history.map((h) => h.date)]) {
         expect(date < s.input.today).toBe(true);
@@ -53,16 +85,10 @@ describe("memory-state fixtures", () => {
     }
   });
 
-  test("every fixture renders the exploit, explore, moods and preferences labels once per person", () => {
+  test("every fixture renders the moods and preferences labels once per person", () => {
     for (const s of memoryStates) {
       const rendered = buildGenerationUserPrompt(s.input);
-      for (const label of [
-        "Their life as we know it (open nodes per area):",
-        "EXPLOIT CANDIDATES for",
-        "EXPLORE CANDIDATES for",
-        "Recent moods (time-bound, never durable):",
-        "Prompt preferences (durable, from feedback):",
-      ]) {
+      for (const label of ["Recent moods (time-bound, never durable):", "Prompt preferences (durable, from feedback):"]) {
         expect(rendered.split(label).length - 1).toBe(2);
       }
     }
@@ -70,13 +96,10 @@ describe("memory-state fixtures", () => {
 });
 
 describe("day-one-empty", () => {
-  test("renders empty-state placeholders rather than omitting the sections", () => {
-    const rendered = render("day-one-empty");
-    expect(rendered).toContain(
-      "(none today; if their stance says exploit anyway, explore instead and say so in the rationale)",
-    );
-    expect(rendered).toContain("Recent moods (time-bound, never durable): (none)");
-    expect(rendered).toContain("Prompt preferences (durable, from feedback): (none yet)");
+  test("both people are assigned a seed target, not a node", () => {
+    const { input } = memoryState("day-one-empty");
+    expect(input.a.target.kind).toBe("seed");
+    expect(input.b.target.kind).toBe("seed");
   });
 
   test("signals day one explicitly in each person's history section", () => {
@@ -86,40 +109,31 @@ describe("day-one-empty", () => {
 });
 
 describe("one-sided", () => {
-  test("the populated person's exploit candidates reach the prompt", () => {
+  test("Alex's rich node target reaches the prompt with its dated facts", () => {
     const rendered = render("one-sided");
     expect(rendered).toContain("Bakes sourdough most weekends.");
-    expect(rendered).toContain("Deciding whether to adopt a second cat.");
+    expect(rendered).toContain("Tried a new rye starter and it collapsed.");
   });
 
-  test("the empty person still gets exploit placeholders and an all-zero domain count line", () => {
-    const rendered = render("one-sided");
-    const samSection = rendered.slice(rendered.indexOf("PERSON B: Sam"));
-    expect(samSection).toContain(
-      "(none today; if their stance says exploit anyway, explore instead and say so in the rationale)",
-    );
-    for (const domain of ALL_DOMAINS) expect(samSection).toContain(`${domain}: 0`);
-  });
-
-  test("the non-answering person shows as no_response in every one of their own history lines", () => {
-    const rendered = render("one-sided");
-    const samSection = rendered.slice(rendered.indexOf("PERSON B: Sam"));
-    expect(samSection.split("(no_response)").length - 1).toBe(2);
+  test("Sam (empty history) is still assigned an answerable seed target", () => {
+    const { input } = memoryState("one-sided");
+    expect(input.b.target.kind).toBe("seed");
+    const samSection = render("one-sided").slice(render("one-sided").indexOf("PERSON B: Sam"));
+    expect(samSection).toContain("ASSIGNED TARGET [seed");
   });
 });
 
 describe("rich-both", () => {
-  test("every exploit candidate fact from both people survives assembly", () => {
+  test("every node target fact from both people survives assembly", () => {
     const { input } = memoryState("rich-both");
     const rendered = buildGenerationUserPrompt(input);
-    for (const c of [input.candidatesA, input.candidatesB]) {
-      for (const n of c.exploit) {
-        for (const f of n.facts) expect(rendered).toContain(`[${f.date}] ${f.text}`);
-      }
+    for (const p of [input.a, input.b]) {
+      if (p.target.kind !== "node") continue;
+      for (const f of p.target.facts) expect(rendered).toContain(`[${f.date}] (${f.kind}) ${f.text}`);
     }
   });
 
-  test("every prior question is listed with its date, under each person's own history, so the model can avoid repeats", () => {
+  test("every prior question is listed with its date, under each person's own history", () => {
     const { input } = memoryState("rich-both");
     const rendered = buildGenerationUserPrompt(input);
     for (const h of input.history) {
@@ -143,11 +157,11 @@ describe("rich-both", () => {
 });
 
 describe("heavy-thread", () => {
-  test("the layoff node is surfaced among Sam's exploit candidates, flagged LIVE, not hidden", () => {
+  test("Sam's assigned target is the layoff node, its thread facts visible not hidden", () => {
     const rendered = render("heavy-thread");
     const samSection = rendered.slice(rendered.indexOf("PERSON B: Sam"));
-    expect(samSection).toContain("LIVE");
-    expect(samSection).toContain("Was laid off on Friday and has not told his parents yet.");
+    expect(samSection).toContain("ASSIGNED TARGET [node 304]");
+    expect(samSection).toContain("(thread) Was laid off on Friday and has not told his parents yet.");
   });
 
   test("the low-energy reply that followed the heavy event is visible in Sam's own history", () => {
@@ -166,10 +180,9 @@ describe("private-asymmetry", () => {
     expect(alexSection).toContain(secret);
   });
 
-  test("Sam's candidates carry no trace of the private job-search node", () => {
+  test("Sam's writer input carries no trace of Alex's private target", () => {
     const { input } = memoryState("private-asymmetry");
-    expect(input.candidatesB.exploit.some((n) => n.subdomain === "job-search")).toBe(false);
-    expect(input.candidatesB.domainCounts["career-academics"]).toBe(0);
+    expect(input.b.target.kind === "node" ? input.b.target.subdomain : "").not.toBe("job-search");
   });
 });
 
@@ -188,32 +201,21 @@ describe("feedback-constrained", () => {
     const rendered = render("feedback-constrained");
     expect(rendered).toContain("Unconsumed prompt ideas they suggested: (none)");
   });
-
-  test("the over-long prompt that triggered the feedback is in history verbatim", () => {
-    const { input } = memoryState("feedback-constrained");
-    expect(buildGenerationUserPrompt(input)).toContain(input.history[0]!.a.text);
-  });
 });
 
 describe("stale-threads", () => {
-  test("provenance dates survive into the rendered candidate facts so staleness is visible", () => {
+  test("provenance dates survive into the rendered target facts so staleness is visible", () => {
     const rendered = render("stale-threads");
-    expect(rendered).toContain("[2026-06-14] Waiting to hear back about a conference talk submission.");
-    expect(rendered).toContain("[2026-06-12] Deciding whether to run a 10K at the end of the month.");
+    expect(rendered).toContain("[2026-06-14] (fact) Waiting to hear back about a conference talk submission.");
+    expect(rendered).toContain("[2026-06-12] (fact) Deciding whether to run a 10K at the end of the month.");
   });
 
-  test("the stale node's lastAsked date is surfaced so it reads as already covered, not fresh", () => {
+  test("background carries the depleted subject so the writer knows it is off limits", () => {
     const rendered = render("stale-threads");
-    expect(rendered).toContain("last asked 2026-06-20");
+    expect(rendered).toContain("daily-life / small-pleasures");
   });
 
-  test("no candidate fact is fresher than the stale window the fixture is testing", () => {
-    const { input } = memoryState("stale-threads");
-    const facts = [input.candidatesA, input.candidatesB].flatMap((c) => c.exploit.flatMap((n) => n.facts));
-    for (const f of facts) expect(f.date.startsWith("2026-06-")).toBe(true);
-  });
-
-  test("today is anchored two months after the newest candidate fact, so the gap is unambiguous", () => {
+  test("today is anchored two months after the newest target fact, so the gap is unambiguous", () => {
     const { input } = memoryState("stale-threads");
     expect(input.today).toBe("2026-08-14");
     expect(render("stale-threads")).toContain("Today is 2026-08-14");

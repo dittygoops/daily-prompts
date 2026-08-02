@@ -1,5 +1,3 @@
-export type NodeStatus = "open" | "depleted" | "closed";
-
 /** Rich means there is visibly material to dig into. Derived from what
  * exists the moment a node is born, because per-node ask statistics never
  * accumulate at one question per person per day: review showed most nodes
@@ -25,24 +23,18 @@ export function shouldDeplete(input: {
   return input.avgYieldChars < input.depletionRatio * input.personMedianChars;
 }
 
-/** A time-bound node closes only once its post-event follow-up was asked
- * AND answered. Closing at "event passed + asked once" killed the best
- * question the system ever generated (the psychic-party follow-up), which
- * is the regression case this rule exists for. */
-export function shouldClose(input: {
-  eventDate: string | null;
-  today: string;
-  followUpAsked: boolean;
-  followUpAnswered: boolean;
-}): boolean {
-  if (input.eventDate === null) return false;
-  if (input.eventDate >= input.today) return false;
-  return input.followUpAsked && input.followUpAnswered;
-}
-
-/** Depletion and closure are claims about the past; a new fact arriving is
- * new evidence and beats both. Without this, every transition moves toward
- * closure and the graph can only decay. */
-export function reopensOnFact(status: NodeStatus): boolean {
-  return status !== "open";
-}
+// shouldClose and reopensOnFact are gone: the 2026-08-02 synthesis design
+// drops nodes.status entirely (budget replaces open/depleted/closed), and
+// neither function had any caller left once ledgerOntology.ts (their only
+// consumer) was deleted with it. shouldDeplete survives only because
+// Ledger.recordYieldForNode (src/ledger/ledger.ts, not owned here) still
+// imports it for compile-compatibility with not-yet-migrated callers; it is
+// dead at runtime against a migrated database (avg_yield_chars no longer
+// exists, so that method throws before shouldDeplete's result would matter).
+// isRich survives only because tests/eval/fixtures/memoryStates.ts (not
+// owned here) still imports it. The landed selector (src/selection/lanes.ts)
+// does NOT use it: lane 1's "richest first" ordering for never-asked nodes
+// is computed from `budget` as a proxy instead (see lanes.ts's own comment),
+// since SelectableNode carries no fact-count field. So isRich is now dead
+// for its originally intended purpose and is kept alive only by that one
+// test fixture import.

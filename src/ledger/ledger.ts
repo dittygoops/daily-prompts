@@ -4,6 +4,13 @@ import { join } from "node:path";
 import type { PersonId } from "../config";
 import { normalizeSubdomain } from "../ontology/normalize";
 import { shouldDeplete } from "../ontology/status";
+import type {
+  AskRow,
+  AuditId,
+  SeedRow,
+  SelectableNode,
+  TokenRow,
+} from "../selection/types";
 
 export type DayState =
   | "dispatched"
@@ -96,6 +103,15 @@ export interface GenerationLogEntry {
   fellBack: boolean;
   fallbackReason: string | null;
   at: string;
+  /** Lane/seed/ask_domain/ask_family (2026-08-02 synthesis design). Optional
+   * and defaulted to null in the insert, deliberately deviating from this
+   * file's earlier required-field pattern: every existing recordGeneration
+   * call site is owned by another package this wave and must keep compiling
+   * without passing these. */
+  lane?: string | null;
+  seedId?: number | null;
+  askDomain?: string | null;
+  askFamily?: string | null;
 }
 
 export interface GenerationLogRow extends GenerationLogEntry {
@@ -133,6 +149,7 @@ interface GenerationLogDbRow {
   raw_response: string | null; rationale: string | null; stance: string | null;
   person: PersonId | null; topic: string | null; target_node_id: number | null; target_domain: string | null;
   fell_back: number; fallback_reason: string | null; at: string;
+  lane: string | null; seed_id: number | null; ask_domain: string | null; ask_family: string | null;
 }
 
 const toGenerationLogRow = (r: GenerationLogDbRow): GenerationLogRow => ({
@@ -153,13 +170,20 @@ const toGenerationLogRow = (r: GenerationLogDbRow): GenerationLogRow => ({
   fellBack: r.fell_back === 1,
   fallbackReason: r.fallback_reason,
   at: r.at,
+  lane: r.lane,
+  seedId: r.seed_id,
+  askDomain: r.ask_domain,
+  askFamily: r.ask_family,
 });
 
 export type NodeDomain =
   | "career-academics" | "childhood" | "family" | "relationships-friends"
   | "hobbies-interests" | "health-body" | "daily-life" | "beliefs-values"
-  | "plans-future" | "other";
+  | "plans-future" | "other" | "tastes-preferences";
 
+/** @deprecated Dropped from the nodes table by the 2026-08-02 synthesis
+ * design's rebuild (budget replaces status). Kept only as a type so
+ * setNodeStatus's signature still compiles for not-yet-migrated callers. */
 export type NodeStatusValue = "open" | "depleted" | "closed";
 
 export interface NodeRow {
@@ -168,11 +192,13 @@ export interface NodeRow {
   domain: NodeDomain;
   subdomain: string;
   summary: string;
-  status: NodeStatusValue;
+  /** Null on a node created before budget grant existed and never rebuilt.
+   * See src/selection/types.ts SelectableNode for the full budget contract. */
+  budget: number | null;
+  family: string | null;
   eventDate: string | null;
   lastAsked: string | null;
   timesAsked: number;
-  avgYieldChars: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -184,6 +210,10 @@ export interface NodeFactRow {
   text: string;
   sourceDayId: number;
   observedDate: string;
+  /** Set when this thread-kind fact was closed out by resolveOpenThreads
+   * (spec "Budget": "Resolution"). Null on facts never resolved, and always
+   * null on non-thread kinds since only threads resolve. */
+  resolvedAt: string | null;
 }
 
 export interface SignalRow {
@@ -194,18 +224,52 @@ export interface SignalRow {
   observedDate: string;
 }
 
+interface TokenDbRow {
+  id: number; node_id: number; event_date: string; created_at: string; spent_at: string | null;
+}
+
+const toTokenRow = (r: TokenDbRow): TokenRow => ({
+  id: r.id, nodeId: r.node_id, eventDate: r.event_date, createdAt: r.created_at, spentAt: r.spent_at,
+});
+
+interface AuditLogDbRow {
+  id: number; run_date: string; audit: string; person: string | null; subject: string | null;
+  detail: string | null; created_at: string;
+}
+
+export interface AuditViolationLogRow {
+  id: number;
+  runDate: string;
+  audit: AuditId;
+  person: PersonId | null;
+  subject: string | null;
+  detail: string | null;
+  createdAt: string;
+}
+
 interface NodeDbRow {
   id: number; person: PersonId; domain: NodeDomain; subdomain: string; summary: string;
-  status: NodeStatusValue; event_date: string | null; last_asked: string | null;
-  times_asked: number; avg_yield_chars: number | null; created_at: string; updated_at: string;
+  budget: number | null; family: string | null; event_date: string | null; last_asked: string | null;
+  times_asked: number; created_at: string; updated_at: string;
 }
 
 const toNodeRow = (r: NodeDbRow): NodeRow => ({
   id: r.id, person: r.person, domain: r.domain, subdomain: r.subdomain, summary: r.summary,
-  status: r.status, eventDate: r.event_date, lastAsked: r.last_asked,
-  timesAsked: r.times_asked, avgYieldChars: r.avg_yield_chars,
+  budget: r.budget, family: r.family, eventDate: r.event_date, lastAsked: r.last_asked,
+  timesAsked: r.times_asked,
   createdAt: r.created_at, updatedAt: r.updated_at,
 });
+
+/** @deprecated Legacy shape for the pre-budget nodes columns (status,
+ * avg_yield_chars), used only by the deprecated recordYieldForNode below so
+ * that file keeps compiling against NodeDbRow's new (post-rebuild) shape.
+ * The columns this reads no longer exist once a database has run the
+ * 'tastes-preferences' rebuild, so calling recordYieldForNode against a
+ * migrated database throws at runtime; that is expected until its one
+ * caller (owned by another package this wave) is removed. */
+interface LegacyNodeDbRow {
+  id: number; times_asked: number; avg_yield_chars: number | null; status: NodeStatusValue;
+}
 
 export interface PromptIdeaRow {
   id: number;
@@ -294,6 +358,125 @@ export class Ledger {
     // encoding rather than a value to compute.
     if (!has("days", "animal_image_id")) {
       db.exec("ALTER TABLE days ADD COLUMN animal_image_id TEXT");
+    }
+
+    // 2026-08-02 synthesis design's nodes rebuild (spec "Migration"). status
+    // and avg_yield_chars cannot be dropped, and budget/family cannot be
+    // added, with an additive ALTER: SQLite has no DROP COLUMN-and-CHECK-
+    // rewrite in one step, and node_facts.node_id is a live FK into nodes, so
+    // this must run the documented FK-off rebuild rather than a naive
+    // "DROP TABLE nodes" (proven to fail with FK rows present in the
+    // adversarial review). Guarded on the CHECK constraint's own text so a
+    // database already rebuilt, or a fresh one that got the 11-domain form
+    // directly from schema.sql, skips this entirely and is a no-op.
+    const nodesSql =
+      (db.query(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'nodes'`).get() as
+        | { sql: string }
+        | undefined)?.sql ?? "";
+    if (!nodesSql.includes("tastes-preferences")) {
+      // Outside any transaction: SQLite only honors a foreign_keys toggle
+      // between transactions, never inside one.
+      db.exec("PRAGMA foreign_keys = OFF;");
+      db.exec("BEGIN IMMEDIATE;");
+      try {
+        db.exec(`CREATE TABLE nodes_new (
+          id INTEGER PRIMARY KEY,
+          person TEXT NOT NULL CHECK (person IN ('a','b')),
+          domain TEXT NOT NULL CHECK (domain IN (
+            'career-academics','childhood','family','relationships-friends',
+            'hobbies-interests','health-body','daily-life','beliefs-values',
+            'plans-future','other','tastes-preferences'
+          )),
+          subdomain TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          budget INTEGER,
+          family TEXT,
+          event_date TEXT,
+          last_asked TEXT,
+          times_asked INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (person, subdomain)
+        );`);
+        // budget/family are NULL for every pre-existing row: the spec's
+        // "rebuild grants budgets ... during replay" is a rebuild-script
+        // concern (P9), not this migration's; a live database's nodes carry
+        // no budget until something re-derives it.
+        db.exec(`INSERT INTO nodes_new
+          (id, person, domain, subdomain, summary, budget, family, event_date, last_asked, times_asked, created_at, updated_at)
+          SELECT id, person, domain, subdomain, summary, NULL, NULL, event_date, last_asked, times_asked, created_at, updated_at
+          FROM nodes;`);
+        db.exec(`DROP TABLE nodes;`);
+        db.exec(`ALTER TABLE nodes_new RENAME TO nodes;`);
+        const violations = db.query(`PRAGMA foreign_key_check`).all();
+        if (violations.length > 0) {
+          db.exec("ROLLBACK;");
+          throw new Error(
+            `nodes rebuild left ${violations.length} foreign key violation(s); rolled back`,
+          );
+        }
+        db.exec("COMMIT;");
+      } catch (err) {
+        // A failed CREATE/INSERT/DROP before COMMIT leaves the transaction
+        // open; a failed foreign_key_check explicitly rolls back above but
+        // reaches here too, so this is idempotent to call on an
+        // already-rolled-back transaction.
+        try {
+          db.exec("ROLLBACK;");
+        } catch {
+          // No transaction was open (the violations branch already rolled
+          // back); nothing further to undo.
+        }
+        db.exec("PRAGMA foreign_keys = ON;");
+        throw err;
+      }
+      db.exec("PRAGMA foreign_keys = ON;");
+    }
+
+    // fact_subjects, followup_tokens, seeds are created AFTER the nodes
+    // rebuild above (spec "Migration": "created AFTER the rebuild so the
+    // rebuild has only node_facts as a child"), whether or not a rebuild
+    // actually ran this time; IF NOT EXISTS makes this a no-op on a database
+    // that already has them.
+    db.exec(`CREATE TABLE IF NOT EXISTS fact_subjects (
+      fact_id INTEGER NOT NULL REFERENCES node_facts(id),
+      node_id INTEGER NOT NULL REFERENCES nodes(id),
+      PRIMARY KEY (fact_id, node_id)
+    );`);
+    db.exec(`CREATE TABLE IF NOT EXISTS followup_tokens (
+      id INTEGER PRIMARY KEY,
+      node_id INTEGER NOT NULL REFERENCES nodes(id),
+      event_date TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      spent_at TEXT,
+      UNIQUE (node_id, event_date)
+    );`);
+    db.exec(`CREATE TABLE IF NOT EXISTS seeds (
+      id INTEGER PRIMARY KEY,
+      text TEXT NOT NULL, domain TEXT NOT NULL, family TEXT NOT NULL,
+      UNIQUE (text)
+    );`);
+
+    // node_facts.resolved_at via guarded ALTER (spec "Schema"), not in the
+    // canonical CREATE TABLE, so a fresh database and a migrated one go
+    // through the identical code path.
+    if (!has("node_facts", "resolved_at")) {
+      db.exec("ALTER TABLE node_facts ADD COLUMN resolved_at TEXT");
+    }
+
+    // generation_log's dispatch-time snapshot columns (spec F11): guarded
+    // ALTERs, not the canonical CREATE TABLE, for the same reason.
+    if (!has("generation_log", "lane")) {
+      db.exec("ALTER TABLE generation_log ADD COLUMN lane TEXT");
+    }
+    if (!has("generation_log", "seed_id")) {
+      db.exec("ALTER TABLE generation_log ADD COLUMN seed_id INTEGER");
+    }
+    if (!has("generation_log", "ask_domain")) {
+      db.exec("ALTER TABLE generation_log ADD COLUMN ask_domain TEXT");
+    }
+    if (!has("generation_log", "ask_family")) {
+      db.exec("ALTER TABLE generation_log ADD COLUMN ask_family TEXT");
     }
   }
 
@@ -624,8 +807,8 @@ export class Ledger {
     this.db
       .query(
         `INSERT INTO generation_log
-           (date, prompt_id, prompt_text, model, system_prompt, user_prompt, raw_response, rationale, stance, person, topic, target_node_id, target_domain, fell_back, fallback_reason, at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (date, prompt_id, prompt_text, model, system_prompt, user_prompt, raw_response, rationale, stance, person, topic, target_node_id, target_domain, fell_back, fallback_reason, at, lane, seed_id, ask_domain, ask_family)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         entry.date,
@@ -644,6 +827,10 @@ export class Ledger {
         entry.fellBack ? 1 : 0,
         entry.fallbackReason,
         entry.at,
+        entry.lane ?? null,
+        entry.seedId ?? null,
+        entry.askDomain ?? null,
+        entry.askFamily ?? null,
       );
   }
 
@@ -677,8 +864,29 @@ export class Ledger {
     return rows.map((r) => r.theme).filter((t): t is string => t !== null);
   }
 
-  /** Subjects this person's recent questions covered, most recent first.
-   * Feeds a deterministic repeat guard: the generator asked four
+  /** @deprecated Superseded by the window reads over recentAsks/AskRow
+   * (W3 domain cooldown) in the 2026-08-02 synthesis design. Body UNCHANGED,
+   * still functional (target_domain is not a dropped column), kept only
+   * until its callers move to the new selector. Domains this person's
+   * recent explore questions opened, newest first. Feeds the explore
+   * cooldown: four childhood explores went out in two days because
+   * exploring records no last_asked on anything. */
+  recentTargetDomains(person: PersonId, limit: number): string[] {
+    const rows = this.db
+      .query<{ target_domain: string | null }, [PersonId, number]>(
+        `SELECT target_domain FROM generation_log
+         WHERE person = ? AND target_domain IS NOT NULL
+         ORDER BY date DESC, id DESC LIMIT ?`,
+      )
+      .all(person, limit);
+    return rows.map((r) => r.target_domain).filter((d): d is string => d !== null);
+  }
+
+  /** @deprecated Superseded by W4 family cooldown over recentAsks/AskRow in
+   * the 2026-08-02 synthesis design. Body UNCHANGED, still functional (topic
+   * is not a dropped column), kept only until its callers move to the new
+   * selector. Subjects this person's recent questions covered, most recent
+   * first. Feeds a deterministic repeat guard: the generator asked four
    * self-improvement questions in six days because content-word similarity
    * cannot tell that "get better at" and "area of growth" are one subject. */
   recentTopics(person: PersonId, limit: number): string[] {
@@ -720,11 +928,19 @@ export class Ledger {
     return this.db.transaction(fn)();
   }
 
-  /** Deletes a person's entire graph: facts, then nodes, then signals. FK
-   * order (node_facts.node_id references nodes) - nodes first would violate
-   * the foreign key. Used by a rebuild before replaying the ledger. */
+  /** Deletes a person's entire graph: fact_subjects, then followup_tokens,
+   * then node_facts, then nodes, then signals. FK order (fact_subjects and
+   * followup_tokens both reference nodes; node_facts.node_id references
+   * nodes) - nodes first would violate the foreign key. Used by a rebuild
+   * before replaying the ledger. */
   wipeGraph(person: PersonId): void {
     const tx = this.db.transaction(() => {
+      this.db
+        .query(`DELETE FROM fact_subjects WHERE node_id IN (SELECT id FROM nodes WHERE person = ?)`)
+        .run(person);
+      this.db
+        .query(`DELETE FROM followup_tokens WHERE node_id IN (SELECT id FROM nodes WHERE person = ?)`)
+        .run(person);
       this.db
         .query(`DELETE FROM node_facts WHERE node_id IN (SELECT id FROM nodes WHERE person = ?)`)
         .run(person);
@@ -744,20 +960,47 @@ export class Ledger {
     subdomain: string;
     summary: string;
     eventDate: string | null;
+    /** Extractor-assigned register (2026-08-02 synthesis design's Families
+     * section), or null when the extractor could not confidently place it.
+     * Optional (not just nullable) so every pre-existing caller across the
+     * tree keeps compiling unchanged; omitted is treated identically to
+     * null. Set once, at creation, mirroring grantBudget's "granted once"
+     * semantics: nothing in this file writes nodes.family afterward except
+     * the migration rebuild's own replay path. */
+    family?: string | null;
     at: string;
   }): number {
     // Normalized before the UNIQUE check so "Fitness Goals" and
     // "fitness-goal" are one identity, not two nodes.
     const subdomain = normalizeSubdomain(input.subdomain);
     const row = this.db
-      .query<{ id: number }, [PersonId, NodeDomain, string, string, string | null, string, string]>(
-        `INSERT INTO nodes (person, domain, subdomain, summary, event_date, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+      .query<{ id: number }, [PersonId, NodeDomain, string, string, string | null, string | null, string, string]>(
+        `INSERT INTO nodes (person, domain, subdomain, summary, event_date, family, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
       )
-      .get(input.person, input.domain, subdomain, input.summary, input.eventDate, input.at, input.at)!;
+      .get(input.person, input.domain, subdomain, input.summary, input.eventDate, input.family ?? null, input.at, input.at)!;
     return row.id;
   }
 
+  /** Updates an existing node's event_date (spec "Event dates": "a new date
+   * on a known subject updates event_date"). Companion to createNode's own
+   * eventDate param, which only covers the creation-time case; this is the
+   * only other place nodes.event_date is written. Always overwrites rather
+   * than comparing against the current value: mintToken's own UNIQUE
+   * constraint is what makes re-filing the same date a no-op, so this
+   * setter does not need its own idempotence check. */
+  setNodeEventDate(nodeId: number, eventDate: string, at: string): void {
+    this.db.query(`UPDATE nodes SET event_date = ?, updated_at = ? WHERE id = ?`).run(eventDate, at, nodeId);
+  }
+
+  /** Files one fact and homes it onto its primary node, returning the fact's
+   * id. Also writes the primary fact_subjects row (spec impl decision 18:
+   * "every home INCLUDING the primary"), so subjectsForFact and the
+   * newestFactDate/newestUnresolvedThreadDate union reads never need a
+   * special case for "the home nobody explicitly recorded". Additional
+   * homes (multi-homed facts) are recorded separately via addFactSubject,
+   * using the returned id. The old reopen-on-fact status write is gone with
+   * nodes.status; there is nothing left here for a new fact to reopen. */
   addNodeFact(input: {
     nodeId: number;
     kind: "fact" | "thread" | "interest";
@@ -765,15 +1008,38 @@ export class Ledger {
     sourceDayId: number;
     observedDate: string;
     at: string;
-  }): void {
+  }): number {
+    const row = this.db
+      .query<{ id: number }, [number, string, string, number, string, string]>(
+        `INSERT INTO node_facts (node_id, kind, text, source_day_id, observed_date, created_at)
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
+      )
+      .get(input.nodeId, input.kind, input.text, input.sourceDayId, input.observedDate, input.at)!;
     this.db
-      .query(`INSERT INTO node_facts (node_id, kind, text, source_day_id, observed_date, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(input.nodeId, input.kind, input.text, input.sourceDayId, input.observedDate, input.at);
-    // Depletion and closure are claims about the past; new evidence beats
-    // both. Without this the graph can only decay.
+      .query(`INSERT OR IGNORE INTO fact_subjects (fact_id, node_id) VALUES (?, ?)`)
+      .run(row.id, input.nodeId);
+    return row.id;
+  }
+
+  /** Records an additional home for a fact already filed via addNodeFact
+   * (multi-homed facts: the same observation is evidence for more than one
+   * subject). Idempotent: re-filing the same (fact, node) pair is a no-op,
+   * not an error, since PRIMARY KEY (fact_id, node_id) would otherwise
+   * throw on a retry that ran the extractor twice. */
+  addFactSubject(factId: number, nodeId: number): void {
     this.db
-      .query(`UPDATE nodes SET status = 'open', updated_at = ? WHERE id = ? AND status != 'open'`)
-      .run(input.at, input.nodeId);
+      .query(`INSERT OR IGNORE INTO fact_subjects (fact_id, node_id) VALUES (?, ?)`)
+      .run(factId, nodeId);
+  }
+
+  /** Every node a fact is homed on (primary and secondary), ascending id. */
+  subjectsForFact(factId: number): number[] {
+    const rows = this.db
+      .query<{ node_id: number }, [number]>(
+        `SELECT node_id FROM fact_subjects WHERE fact_id = ? ORDER BY node_id`,
+      )
+      .all(factId);
+    return rows.map((r) => r.node_id);
   }
 
   addSignal(input: {
@@ -816,13 +1082,18 @@ export class Ledger {
 
   nodeFactsFor(nodeId: number): NodeFactRow[] {
     return this.db
-      .query<{ id: number; node_id: number; kind: NodeFactRow["kind"]; text: string; source_day_id: number; observed_date: string }, [number]>(
-        `SELECT id, node_id, kind, text, source_day_id, observed_date FROM node_facts WHERE node_id = ? ORDER BY observed_date, id`,
+      .query<{ id: number; node_id: number; kind: NodeFactRow["kind"]; text: string; source_day_id: number; observed_date: string; resolved_at: string | null }, [number]>(
+        `SELECT id, node_id, kind, text, source_day_id, observed_date, resolved_at FROM node_facts WHERE node_id = ? ORDER BY observed_date, id`,
       )
       .all(nodeId)
-      .map((r) => ({ id: r.id, nodeId: r.node_id, kind: r.kind, text: r.text, sourceDayId: r.source_day_id, observedDate: r.observed_date }));
+      .map((r) => ({ id: r.id, nodeId: r.node_id, kind: r.kind, text: r.text, sourceDayId: r.source_day_id, observedDate: r.observed_date, resolvedAt: r.resolved_at }));
   }
 
+  /** @deprecated nodes.status is dropped by the 2026-08-02 synthesis
+   * design's rebuild; budget (grantBudget/recordAsk/resolveOpenThreads/
+   * refillBudget) replaces it. Body UNCHANGED so callers owned by other
+   * packages this wave keep compiling; throws at runtime against a migrated
+   * database ("no such column: status"). */
   setNodeStatus(nodeId: number, status: NodeStatusValue, at: string): void {
     this.db.query(`UPDATE nodes SET status = ?, updated_at = ? WHERE id = ?`).run(status, at, nodeId);
   }
@@ -839,8 +1110,293 @@ export class Ledger {
     this.db.query(`UPDATE nodes SET last_asked = ?, updated_at = ? WHERE id = ?`).run(date, at, nodeId);
   }
 
-  /** Median of this person's answered lengths; the baseline that makes
-   * depletion relative rather than an absolute floor no real answer crosses. */
+  /** The 2026-08-02 synthesis design's dispatch write, replacing recordAsked
+   * for lanes exploit/followup: last_asked, times_asked, and budget all move
+   * in the one statement the spec requires ("recordAsk: last_asked,
+   * times_asked, budget, one statement"), so there is no window where an
+   * ask is recorded but the budget it should have spent is not. Floors at 0
+   * rather than going negative: a token ask never calls this at all (lane 0
+   * bypasses budget per spec), so the only caller here is lane 1/2 exploit
+   * dispatch against a node already known budget > 0, but the floor is kept
+   * as a defensive invariant rather than trusted to the caller. */
+  recordAsk(nodeId: number, date: string, at: string): void {
+    this.db
+      .query(
+        `UPDATE nodes SET last_asked = ?, updated_at = ?, times_asked = times_asked + 1,
+           budget = MAX(COALESCE(budget, 0) - 1, 0)
+         WHERE id = ?`,
+      )
+      .run(date, at, nodeId);
+  }
+
+  /** Semantic closure (spec "Budget"): granted once, when a node's creating
+   * filing commits, from every fact kind filed onto it in that transaction
+   * (primary or secondary home). Never 0; the highest-ranking kind present
+   * wins: any thread -> 3, else any interest -> 2, else (fact kinds only)
+   * -> 1. Capped so a rebuild replaying a node with an unusually rich
+   * founding filing cannot mint more budget than a live grant ever could. */
+  grantBudget(nodeId: number, kinds: ("fact" | "thread" | "interest")[], cap: number, at: string): void {
+    let budget = 1;
+    if (kinds.includes("interest")) budget = 2;
+    if (kinds.includes("thread")) budget = 3;
+    budget = Math.min(budget, Math.max(cap, 1));
+    this.db.query(`UPDATE nodes SET budget = ?, updated_at = ? WHERE id = ?`).run(budget, at, nodeId);
+  }
+
+  /** Direct budget write, for the migration rebuild's replay and for tests;
+   * ordinary dispatch/resolution/refill flow uses recordAsk/
+   * resolveOpenThreads/refillBudget instead so the arithmetic lives in one
+   * place each. */
+  setNodeBudget(nodeId: number, budget: number, at: string): void {
+    this.db.query(`UPDATE nodes SET budget = ?, updated_at = ? WHERE id = ?`).run(budget, at, nodeId);
+  }
+
+  /** Resolution (spec "Budget"): after extraction of an answer to a question
+   * that targeted node N, if no new thread-kind fact landed on N (via any
+   * home), N's open threads are stamped resolved_at AND budget drops to 0 in
+   * the same transaction ("resolution zeroes budget"). Threads are resolved
+   * across ALL homes via fact_subjects, matching W1's union reading, so a
+   * thread multi-homed onto N counts even when N is not its primary node.
+   * Returns the count of threads resolved, for callers that want to log it. */
+  resolveOpenThreads(nodeId: number, at: string): number {
+    const tx = this.db.transaction(() => {
+      const result = this.db
+        .query(
+          `UPDATE node_facts SET resolved_at = ?
+           WHERE kind = 'thread' AND resolved_at IS NULL
+             AND id IN (SELECT fact_id FROM fact_subjects WHERE node_id = ?)`,
+        )
+        .run(at, nodeId);
+      this.db.query(`UPDATE nodes SET budget = 0, updated_at = ? WHERE id = ?`).run(at, nodeId);
+      return result.changes;
+    });
+    return tx();
+  }
+
+  /** Refill (spec "Budget", F5): a new thread-kind fact filed onto N by any
+   * filing whatsoever, targeted or not, sets budget = min(cap, max(budget,
+   * 0) + 1). `cap` defaults to the spec's budgetCap constant (3) so ordinary
+   * callers do not need to thread the config value through; a caller
+   * running against a non-default config passes its own cap. */
+  refillBudget(nodeId: number, at: string, cap = 3): void {
+    this.db
+      .query(`UPDATE nodes SET budget = MIN(?, MAX(COALESCE(budget, 0), 0) + 1), updated_at = ? WHERE id = ?`)
+      .run(cap, at, nodeId);
+  }
+
+  /** Mints a follow-up token for one distinct (node, event_date) (F1: "one
+   * token per distinct event per node, so recurring events each earn their
+   * follow-up"). Idempotent via the UNIQUE(node_id, event_date) constraint:
+   * filing the same event date twice (a retry, or a second mention) mints
+   * nothing extra rather than throwing. */
+  mintToken(nodeId: number, eventDate: string, at: string): void {
+    this.db
+      .query(`INSERT OR IGNORE INTO followup_tokens (node_id, event_date, created_at) VALUES (?, ?, ?)`)
+      .run(nodeId, eventDate, at);
+  }
+
+  /** Spends a token in the same transaction as the ask that fired it (spec:
+   * "Spend = spent_at in the ask's transaction"). Guarded on spent_at IS
+   * NULL so a double-spend attempt is a no-op, not silent data loss. */
+  spendToken(tokenId: number, at: string): void {
+    this.db
+      .query(`UPDATE followup_tokens SET spent_at = ? WHERE id = ? AND spent_at IS NULL`)
+      .run(at, tokenId);
+  }
+
+  /** Lane 0 eligibility (spec "Lanes"): unspent tokens whose event_date
+   * falls in the signed window [today - windowDays, today), so a future
+   * event's token never looks fireable early (F12). */
+  fireableTokens(today: string, windowDays: number): TokenRow[] {
+    return this.db
+      .query<TokenDbRow, [string, number, string]>(
+        `SELECT * FROM followup_tokens
+         WHERE spent_at IS NULL
+           AND event_date >= date(?, '-' || ? || ' days')
+           AND event_date < ?
+         ORDER BY event_date, id`,
+      )
+      .all(today, windowDays, today)
+      .map(toTokenRow);
+  }
+
+  /** Tokens whose event_date fell out of the fireable window while still
+   * unspent: a real audit invariant (A5), not "or logged why" (spec). */
+  expiredUnspentTokens(today: string, windowDays: number): TokenRow[] {
+    return this.db
+      .query<TokenDbRow, [string, number]>(
+        `SELECT * FROM followup_tokens
+         WHERE spent_at IS NULL AND event_date < date(?, '-' || ? || ' days')
+         ORDER BY event_date, id`,
+      )
+      .all(today, windowDays)
+      .map(toTokenRow);
+  }
+
+  /** Every token for one node, regardless of status, newest event first.
+   * Neither fireableTokens nor expiredUnspentTokens covers a future-dated
+   * unspent token (an event not yet due), so print-graph's tokens section
+   * (pending/spent/expired) reads this instead and buckets by spent_at and
+   * event_date itself. */
+  tokensForNode(nodeId: number): TokenRow[] {
+    return this.db
+      .query<TokenDbRow, [number]>(
+        `SELECT * FROM followup_tokens WHERE node_id = ? ORDER BY event_date DESC, id DESC`,
+      )
+      .all(nodeId)
+      .map(toTokenRow);
+  }
+
+  /** Replaces the entire seed bank in one transaction: the static bank is
+   * copied not moved (spec's seed logistics), so a reload always starts from
+   * a clean, fully-specified set of rows with the TSV's own stable ids
+   * rather than accreting stale entries a later edit removed. */
+  replaceSeeds(rows: SeedRow[]): void {
+    const tx = this.db.transaction(() => {
+      this.db.query(`DELETE FROM seeds`).run();
+      for (const row of rows) {
+        this.db
+          .query(`INSERT INTO seeds (id, text, domain, family) VALUES (?, ?, ?, ?)`)
+          .run(row.id, row.text, row.domain, row.family);
+      }
+    });
+    tx();
+  }
+
+  allSeeds(): SeedRow[] {
+    return this.db.query<SeedRow, []>(`SELECT id, text, domain, family FROM seeds ORDER BY id`).all();
+  }
+
+  /** Seed ids this person has been asked since `sinceDate` (spec's
+   * seedReuseDays window for lane 2), read from generation_log.seed_id: the
+   * bank never drains, it cycles once a seed ages out of the window. */
+  usedSeedIdsWithin(person: PersonId, sinceDate: string): Set<number> {
+    const rows = this.db
+      .query<{ seed_id: number }, [PersonId, string]>(
+        `SELECT DISTINCT seed_id FROM generation_log
+         WHERE person = ? AND seed_id IS NOT NULL AND date >= ?`,
+      )
+      .all(person, sinceDate);
+    return new Set(rows.map((r) => r.seed_id));
+  }
+
+  /** One person's nodes in the shape the selector needs to run every window
+   * and lane-1 ordering rule without a further read: newestFactDate and
+   * newestUnresolvedThreadDate are both computed across ALL homes via
+   * fact_subjects (spec F7's union reading, F4's thread-first ordering).
+   * Two per-node subqueries rather than one grouped join: the couple's graph
+   * is small (tens of nodes per person), and a straight MAX(...) per node is
+   * far easier to verify against the spec's prose than a single query that
+   * has to fold both aggregates and the "unresolved" filter together. */
+  selectableNodes(person: PersonId): SelectableNode[] {
+    const rows = this.db
+      .query<NodeDbRow, [PersonId]>(`SELECT * FROM nodes WHERE person = ? ORDER BY id`)
+      .all(person);
+    return rows.map((r) => {
+      const newestFact = this.db
+        .query<{ d: string | null }, [number]>(
+          `SELECT MAX(nf.observed_date) AS d FROM node_facts nf
+           JOIN fact_subjects fs ON fs.fact_id = nf.id
+           WHERE fs.node_id = ?`,
+        )
+        .get(r.id)!;
+      const newestThread = this.db
+        .query<{ d: string | null }, [number]>(
+          `SELECT MAX(nf.observed_date) AS d FROM node_facts nf
+           JOIN fact_subjects fs ON fs.fact_id = nf.id
+           WHERE fs.node_id = ? AND nf.kind = 'thread' AND nf.resolved_at IS NULL`,
+        )
+        .get(r.id)!;
+      return {
+        id: r.id,
+        person: r.person,
+        domain: r.domain,
+        family: r.family,
+        subdomain: r.subdomain,
+        summary: r.summary,
+        budget: r.budget,
+        lastAsked: r.last_asked,
+        timesAsked: r.times_asked,
+        createdAt: r.created_at,
+        newestFactDate: newestFact.d,
+        newestUnresolvedThreadDate: newestThread.d,
+      };
+    });
+  }
+
+  /** The mandatory window/audit read pattern (spec, every window and audit):
+   * one row per (date, person) by max(id), fell_back = 0, person NOT NULL.
+   * The live table already holds a hotfix duplicate and seven legacy
+   * null-person rows (impl decision 6); this is the one query that encodes
+   * the dedup so no window or audit reimplements it slightly differently. */
+  recentAsks(sinceDate: string): AskRow[] {
+    const rows = this.db
+      .query<GenerationLogDbRow, [string]>(
+        `SELECT g.* FROM generation_log g
+         JOIN (
+           SELECT date, person, MAX(id) AS max_id
+           FROM generation_log
+           WHERE fell_back = 0 AND person IS NOT NULL AND date >= ?
+           GROUP BY date, person
+         ) m ON m.max_id = g.id
+         ORDER BY g.date, g.person`,
+      )
+      .all(sinceDate);
+    return rows.map((r) => ({
+      id: r.id,
+      date: r.date,
+      person: r.person as PersonId,
+      targetNodeId: r.target_node_id,
+      askDomain: r.ask_domain,
+      askFamily: r.ask_family,
+      lane: (r.lane as AskRow["lane"]) ?? null,
+      seedId: r.seed_id,
+    }));
+  }
+
+  /** Persists one audit run's violations, one row per finding, idempotent on
+   * UNIQUE(run_date, audit, person, subject): a rerun of the nightly poller
+   * can never double-count the same finding. */
+  recordAuditViolations(
+    runDate: string,
+    violations: { audit: AuditId; person: PersonId | null; subject: string | null; detail: string | null }[],
+    at: string,
+  ): void {
+    const tx = this.db.transaction(() => {
+      for (const v of violations) {
+        this.db
+          .query(
+            `INSERT OR IGNORE INTO audit_log (run_date, audit, person, subject, detail, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .run(runDate, v.audit, v.person, v.subject, v.detail, at);
+      }
+    });
+    tx();
+  }
+
+  auditViolationsSince(sinceDate: string): AuditViolationLogRow[] {
+    const rows = this.db
+      .query<AuditLogDbRow, [string]>(
+        `SELECT * FROM audit_log WHERE run_date >= ? ORDER BY run_date, id`,
+      )
+      .all(sinceDate);
+    return rows.map((r) => ({
+      id: r.id,
+      runDate: r.run_date,
+      audit: r.audit as AuditId,
+      person: r.person as PersonId | null,
+      subject: r.subject,
+      detail: r.detail,
+      createdAt: r.created_at,
+    }));
+  }
+
+  /** @deprecated Median of this person's answered lengths; fed the
+   * status/avg_yield_chars depletion math dropped by the 2026-08-02
+   * synthesis design's rebuild. Body UNCHANGED and still functional (reads
+   * person_days, not nodes), kept only until recordYieldForNode's one caller
+   * (owned by another package this wave) is removed. */
   personMedianAnswerChars(person: PersonId): number | null {
     const rows = this.db
       .query<{ len: number }, [PersonId]>(
@@ -854,11 +1410,15 @@ export class Ledger {
     return rows.length % 2 === 1 ? rows[mid]!.len : (rows[mid - 1]!.len + rows[mid]!.len) / 2;
   }
 
-  /** Folds one answer into a node's running mean and runs the depletion
-   * check, in one transaction. This is the one copy of the yield math:
-   * `recordYield` looks up its generation-log target and delegates here, and
-   * a rebuild's argmax attribution (which has no generation_log row to look
-   * up, since replay predates any dispatch) calls this directly. */
+  /** @deprecated Reads/writes nodes.status and nodes.avg_yield_chars, both
+   * dropped by the 2026-08-02 synthesis design's rebuild. Left in place,
+   * body UNCHANGED, so callers owned by other packages this wave keep
+   * compiling; it throws at runtime against a migrated database. Folds one
+   * answer into a node's running mean and runs the depletion check, in one
+   * transaction. This is the one copy of the yield math: `recordYield` looks
+   * up its generation-log target and delegates here, and a rebuild's argmax
+   * attribution (which has no generation_log row to look up, since replay
+   * predates any dispatch) calls this directly. */
   recordYieldForNode(
     nodeId: number,
     person: PersonId,
@@ -878,7 +1438,7 @@ export class Ledger {
         )
         .run(chars, date, new Date().toISOString(), nodeId);
 
-      const node = this.db.query<NodeDbRow, [number]>(`SELECT * FROM nodes WHERE id = ?`).get(nodeId)!;
+      const node = this.db.query<LegacyNodeDbRow, [number]>(`SELECT * FROM nodes WHERE id = ?`).get(nodeId)!;
       const median = this.personMedianAnswerChars(person);
       if (
         median !== null &&

@@ -152,4 +152,60 @@ describe("loadConfig", () => {
       expect(true).toBe(true);
     });
   });
+
+  describe("selection", () => {
+    // Every field here is a window length or a count, never a switch, so
+    // these defaults (from the ee-synthesis-design spec's Constants section)
+    // are safe to apply automatically: an existing config.json written
+    // before this block existed just gets the spec's windows, not a new
+    // behavior turned on.
+    test("defaults to the spec's window and count values when no selection block is present", () => {
+      const config = loadConfig(validRaw, validEnv);
+      expect(config.selection).toEqual({
+        settlingDays: 2,
+        subjectCooldownDays: 14,
+        domainCooldownDays: 4,
+        familyCooldownDays: 7,
+        tokenWindowDays: 3,
+        exploitRunCap: 2,
+        budgetCap: 3,
+        candidateDepth: 8,
+        seedReuseDays: 90,
+        anchorMinSharedWords: 1,
+      });
+    });
+
+    test("honors an explicit selection block", () => {
+      const config = loadConfig(
+        {
+          ...validRaw,
+          selection: {
+            settlingDays: 1,
+            subjectCooldownDays: 10,
+            domainCooldownDays: 3,
+            familyCooldownDays: 5,
+            tokenWindowDays: 2,
+            exploitRunCap: 3,
+            budgetCap: 4,
+            candidateDepth: 6,
+            seedReuseDays: 60,
+            anchorMinSharedWords: 2,
+          },
+        },
+        validEnv,
+      );
+      expect(config.selection).toEqual({
+        settlingDays: 1,
+        subjectCooldownDays: 10,
+        domainCooldownDays: 3,
+        familyCooldownDays: 5,
+        tokenWindowDays: 2,
+        exploitRunCap: 3,
+        budgetCap: 4,
+        candidateDepth: 6,
+        seedReuseDays: 60,
+        anchorMinSharedWords: 2,
+      });
+    });
+  });
 });

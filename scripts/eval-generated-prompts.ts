@@ -32,6 +32,7 @@ interface Scored {
   text: string;
   rationale: string | null;
   stance: string | null;
+  lane: string | null;
   model: string | null;
   judgment: Judgment;
   novelty: NearestPriorMatch | null;
@@ -52,6 +53,7 @@ for (const row of generated) {
     text: row.promptText!,
     rationale: row.rationale,
     stance: row.stance,
+    lane: row.lane ?? null,
     model: row.model,
     judgment: await judgePrompt(row.promptText!, llm),
     novelty: nearestPrior(row.promptText!, priors),
@@ -67,11 +69,15 @@ const axisFailures = Object.fromEntries(
   AXES.map(([axis]) => [axis, scored.filter((s) => !s.judgment[axis]).length]),
 ) as Record<(typeof AXES)[number][0], number>;
 
-/** The stance is now recorded explicitly (assigned in code, see
- * src/prompts/stance.ts). Rows predating that column fall back to
- * classifying the free-text rationale, which is why "unclear" still
- * exists and why the earliest days report less precisely. */
-function stance(row: { stance: string | null; rationale: string | null }): "exploit" | "explore" | "unclear" {
+/** The three-way lane truth (2026-08-02 synthesis design: followup/exploit/
+ * explore) is now recorded explicitly in generation_log.lane at dispatch.
+ * Rows predating that column (stance was the only signal then) fall back to
+ * classifying the two-value stance, or failing that the free-text rationale;
+ * a historical exploit row can never be told apart from a followup row after
+ * the fact, so it reports as "exploit", not a guessed "followup". "unclear"
+ * still exists for the oldest rows that predate even stance. */
+function lane(row: { lane: string | null; stance: string | null; rationale: string | null }): "followup" | "exploit" | "explore" | "unclear" {
+  if (row.lane === "followup" || row.lane === "exploit" || row.lane === "explore") return row.lane;
   if (row.stance === "exploit" || row.stance === "explore") return row.stance;
   const rationale = row.rationale;
   if (!rationale) return "unclear";
@@ -84,8 +90,8 @@ function stance(row: { stance: string | null; rationale: string | null }): "expl
   return "unclear";
 }
 
-const stances = { exploit: 0, explore: 0, unclear: 0 };
-for (const s of scored) stances[stance(s)]++;
+const lanes = { followup: 0, exploit: 0, explore: 0, unclear: 0 };
+for (const s of scored) lanes[lane(s)]++;
 
 const pct = (n: number, d: number) => (d === 0 ? "n/a" : `${Math.round((n / d) * 100)}%`);
 const mark = (b: boolean) => (b ? "✅" : "❌");
@@ -118,13 +124,13 @@ if (fellBack.length > 0) {
   for (const f of fellBack) lines.push(`- \`${f.date}\`: ${f.fallbackReason ?? "(no reason recorded)"}`);
 }
 lines.push("");
-lines.push(`### Explore / exploit mix`);
+lines.push(`### Lane mix`);
 lines.push("");
-lines.push(`Read from the recorded stance column, falling back to classifying the rationale for rows predating it:`);
+lines.push(`Read from the recorded lane column (followup/exploit/explore), falling back to stance and then the rationale for rows predating it:`);
 lines.push("");
-lines.push(`| stance | count | share |`);
+lines.push(`| lane | count | share |`);
 lines.push(`|---|---|---|`);
-for (const [k, v] of Object.entries(stances)) lines.push(`| ${k} | ${v} | ${pct(v, scored.length)} |`);
+for (const [k, v] of Object.entries(lanes)) lines.push(`| ${k} | ${v} | ${pct(v, scored.length)} |`);
 lines.push("");
 lines.push(`### Axis failure distribution`);
 lines.push("");
@@ -212,7 +218,7 @@ lines.push("");
 lines.push(`## Recorded rationales`);
 lines.push("");
 for (const s of scored) {
-  lines.push(`- \`${s.date}\` (${stance(s)}): ${s.rationale ?? "(none recorded)"}`);
+  lines.push(`- \`${s.date}\` (${lane(s)}): ${s.rationale ?? "(none recorded)"}`);
 }
 lines.push("");
 

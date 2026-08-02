@@ -67,16 +67,27 @@ function attributeDay(factsByNode: Record<number, number>): { nodeId: number; fa
  * from scratch. Recovers from a bad extraction run (a code/prompt bug, a
  * misconfigured backend) since the ledger is the durable source of truth and
  * the graph is fully rederivable from it. Destructive: callers (the CLI
- * wrapper) must gate this behind an explicit confirmation. After replay,
- * walks each filing in date order and applies argmax yield attribution,
- * since a rebuild otherwise leaves the whole graph presenting as never-asked
- * (every node looks fresh, so the very first exploit pick re-asks whatever
- * was just answered). */
+ * wrapper) must gate this behind an explicit confirmation.
+ *
+ * Budget grant/refill/mint/resolution (spec "Budget", "Migration") are NOT
+ * driven from here: fileExtraction (src/extraction/pipeline.ts) now performs
+ * all of it inside the same transaction that files each day's facts, for
+ * every caller of processPending, live daemon or this replay alike. Replay
+ * calls that exact same function once per resolved day in date order, so a
+ * rebuilt graph's budgets and tokens match a lived sequence by construction
+ * (tests/rebuild.test.ts's "matches a lived sequence" case proves this by
+ * diffing the two rather than trusting the argument). This file's own
+ * remaining job, on top of that replay, is argmax yield attribution below:
+ * a rebuild wipes last_asked/times_asked/budget along with everything else,
+ * and generation_log (dispatch records) is NOT wiped, but historical rows
+ * frequently predate target_node_id ever being written, so there is no
+ * complete substitute for guessing a day's subject from what got filed. */
 export async function rebuildMemory(
   deps: RebuildDeps,
   opts: RebuildOptions = {},
 ): Promise<RebuildResult> {
   const people = opts.person ? [opts.person] : ALL_PEOPLE;
+  const now = deps.now ?? (() => new Date().toISOString());
 
   if (opts.dryRun) {
     for (const person of people) {
@@ -88,8 +99,8 @@ export async function rebuildMemory(
 
   for (const person of people) {
     deps.log(`wiping graph for ${person}`);
-    // FK order: facts before nodes (node_facts.node_id references nodes),
-    // then signals (no FK relationship, order doesn't matter for them).
+    // FK order: fact_subjects/followup_tokens, then node_facts, then nodes,
+    // then signals - Ledger.wipeGraph's own method, not hand-rolled here.
     deps.ledger.wipeGraph(person);
     if (deps.memory) {
       deps.log(`wiping legacy memory for ${person}`);
@@ -106,10 +117,11 @@ export async function rebuildMemory(
 
   // Attribution runs per filing, interleaved with the replay (via onFiling),
   // not in a second pass afterwards. unprocessedResolvedDays orders by date,
-  // so the walk is chronological either way, but attribution can deplete a
-  // node while addNodeFact reopens a depleted one: attributing only after
-  // every day was filed would strand a node depleted that a later day's fact
-  // should have reopened.
+  // so the walk is chronological either way, but attribution's recordAsk
+  // spends budget that a later filing's refill (inside fileExtraction) can
+  // restore: attributing only after every day was filed would strand a
+  // node's budget at whatever the last-seen state was, rather than what
+  // living the days in order would have produced.
   const attribute = (filing: DayFiling): void => {
     const decision = attributeDay(filing.factsByNode);
     if ("reason" in decision) {
@@ -122,7 +134,13 @@ export async function rebuildMemory(
       deps.log(`declined attribution ${filing.date} person ${filing.person}: no answer to fold into yield`);
       return;
     }
-    deps.ledger.recordYieldForNode(decision.nodeId, filing.person, filing.date, filing.responseChars);
+    // recordYieldForNode (avg_yield_chars/depletion) is gone on a migrated
+    // schema (status and avg_yield_chars are dropped columns; it throws at
+    // runtime there). recordAsk is the 2026-08-02 design's replacement
+    // dispatch writer (last_asked, times_asked, budget, one statement): a
+    // rebuild otherwise leaves the whole graph presenting as never-asked, so
+    // argmax attribution's surviving job is exactly to backfill that.
+    deps.ledger.recordAsk(decision.nodeId, filing.date, now());
     attributed.push({ date: filing.date, person: filing.person, nodeId: decision.nodeId, facts: decision.facts });
     deps.log(`attributed ${filing.date} person ${filing.person} -> node ${decision.nodeId} (${decision.facts} facts)`);
   };

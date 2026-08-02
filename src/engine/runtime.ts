@@ -313,15 +313,12 @@ export class EngineRuntime {
       case "FinalizeResponse":
         if (this.currentDayId !== null) {
           ledger.finalizeResponse(this.currentDayId, effect.person, effect.text, effect.at);
-          // Fold this answer into the targeted node's yield. No-op on
-          // explore, fallback, and pre-ontology days; isolated so a
-          // bookkeeping bug can never block the share that follows.
-          try {
-            const day = ledger.day(this.currentDayId);
-            ledger.recordYield(day.date, effect.person, effect.text.length);
-          } catch (err) {
-            this.log(`node yield bookkeeping failed (non-fatal): ${err}`);
-          }
+          // recordYield call removed (2026-08-02 synthesis design): the
+          // method is deprecated and throws against a migrated database
+          // (nodes.avg_yield_chars/status are dropped by the rebuild), and
+          // the length-based yield/depletion mechanism it fed is deleted by
+          // the spec outright (budget replaces status; resolution/refill
+          // replace depletion).
         }
         break;
       case "MarkSkipped":

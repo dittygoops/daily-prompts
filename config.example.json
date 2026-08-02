@@ -26,5 +26,17 @@
     "animalImage": true,
     "animalKind": "cats",
     "animalTimeoutMs": 10000
+  },
+  "selection": {
+    "settlingDays": 2,
+    "subjectCooldownDays": 14,
+    "domainCooldownDays": 4,
+    "familyCooldownDays": 7,
+    "tokenWindowDays": 3,
+    "exploitRunCap": 2,
+    "budgetCap": 3,
+    "candidateDepth": 8,
+    "seedReuseDays": 90,
+    "anchorMinSharedWords": 1
   }
 }

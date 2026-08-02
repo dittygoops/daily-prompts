@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isRich, shouldDeplete, shouldClose, reopensOnFact } from "../../src/ontology/status";
+import { isRich, shouldDeplete } from "../../src/ontology/status";
 
 describe("isRich", () => {
   test("three facts on one day is rich", () => {
@@ -50,41 +50,7 @@ describe("shouldDeplete", () => {
   });
 });
 
-describe("shouldClose", () => {
-  // The psychic-party regression: the follow-up must be asked AND answered
-  // before the event node closes, and its facts live on in other nodes.
-  test("event passed but follow-up not yet asked stays open", () => {
-    expect(shouldClose({ eventDate: "2026-07-26", today: "2026-07-27", followUpAsked: false, followUpAnswered: false })).toBe(false);
-  });
-
-  test("follow-up asked but unanswered stays open", () => {
-    expect(shouldClose({ eventDate: "2026-07-26", today: "2026-07-27", followUpAsked: true, followUpAnswered: false })).toBe(false);
-  });
-
-  test("event passed, follow-up asked and answered closes", () => {
-    expect(shouldClose({ eventDate: "2026-07-26", today: "2026-07-28", followUpAsked: true, followUpAnswered: true })).toBe(true);
-  });
-
-  test("no event date never closes", () => {
-    expect(shouldClose({ eventDate: null, today: "2026-07-28", followUpAsked: true, followUpAnswered: true })).toBe(false);
-  });
-
-  test("future event never closes", () => {
-    expect(shouldClose({ eventDate: "2026-08-15", today: "2026-07-28", followUpAsked: false, followUpAnswered: false })).toBe(false);
-  });
-});
-
-describe("reopensOnFact", () => {
-  test("a new fact reopens a depleted node", () => {
-    // Depletion is a claim about the past; new evidence beats it.
-    expect(reopensOnFact("depleted")).toBe(true);
-  });
-
-  test("a new fact reopens a closed node", () => {
-    expect(reopensOnFact("closed")).toBe(true);
-  });
-
-  test("an open node stays open", () => {
-    expect(reopensOnFact("open")).toBe(false);
-  });
-});
+// shouldClose and reopensOnFact are deleted along with their tests: the
+// 2026-08-02 synthesis design drops nodes.status (budget replaces
+// open/depleted/closed), and both functions lost their only caller
+// (ledgerOntology.ts) in the same rebuild.

@@ -1,0 +1,131 @@
+# reviewed: PENDING
+1	tastes-preferences	food	What's your favorite thing to cook?
+2	tastes-preferences	food	What's your ideal breakfast?
+3	tastes-preferences	food	What's your dream coffee/drink order if money and calories didn't matter?
+4	tastes-preferences	food	If you could teleport anywhere just for dinner tonight, where?
+5	tastes-preferences	food	What's one food you flat-out refuse to eat?
+6	daily-life	food	Best meal you've had this month?
+7	daily-life	play	What's the last thing that made you laugh out loud?
+8	hobbies-interests	play	What game (board, video, card, anything) could you play forever?
+9	relationships-friends	play	Best concert or live event you've ever been to?
+10	hobbies-interests	play	What song have you had on repeat lately?
+11	daily-life	daily-mechanics	What's your most-used emoji, and why that one?
+12	daily-life	daily-mechanics	Window or aisle seat, and what's the reasoning?
+13	health-body	daily-mechanics	What's your favorite time of day, and what makes it yours?
+14	daily-life	daily-mechanics	Which app do you open first in the morning?
+15	daily-life	daily-mechanics	What's a tiny thing that always makes your day a little better?
+16	daily-life	daily-mechanics	Free Saturday, zero obligations: what does it look like?
+17	other	daily-mechanics	What's a small purchase (under $25) that genuinely improved your life?
+18	other	daily-mechanics	What's something you've been meaning to try but still haven't?
+19	daily-life	home	What's your go-to comfort show?
+20	family	home	What's your favorite family tradition?
+21	hobbies-interests	media	Best movie you've seen in the last 6 months?
+22	childhood	nostalgia	How old were you when you learned to ride a bike?
+23	childhood	nostalgia	What's a smell that instantly takes you back somewhere?
+24	childhood	nostalgia	What were you obsessed with at age 10?
+25	childhood	nostalgia	What did 8-year-old you want to be when you grew up?
+26	other	self-improvement	What's a skill you'd download Matrix-style right now if you could?
+27	childhood	work-school	What was your favorite class you ever took in school?
+28	relationships-friends	nostalgia	Who was your first celebrity crush?
+29	family	people	Best gift you've ever received?
+30	childhood	nostalgia	What's the first concert/movie/book you remember loving as a kid?
+31	other	food	What's the last new restaurant you tried, and would you go back?
+32	tastes-preferences	food	What's your order at the place you go most often?
+33	childhood	nostalgia	What was your favorite toy as a kid?
+34	family	nostalgia	What's a meal your family always made growing up?
+35	childhood	nostalgia	What show did you rush home to watch as a kid?
+36	family	people	Who's the family member you talk to most often?
+37	relationships-friends	people	Who's the friend you've known the longest?
+38	relationships-friends	people	Who's the person who makes you laugh the hardest?
+39	family	people	Who in your family do you think you take after most?
+40	relationships-friends	people	Who's the last person you texted just to say hi?
+41	childhood	people	Who taught you how to cook?
+42	beliefs-values	people	Who's your go-to person for advice on small stuff?
+43	relationships-friends	people	Who's someone you lost touch with that you think about sometimes?
+44	health-body	self-improvement	What's a habit you're actually proud you've kept up?
+45	career-academics	self-improvement	What's a skill you picked up this year without really trying?
+46	beliefs-values	self-improvement	What's the best piece of advice you've ever actually followed?
+47	other	self-improvement	What's a book or podcast that changed how you think about something small?
+48	career-academics	self-improvement	What's something you got noticeably better at in the last year?
+49	tastes-preferences	self-improvement	What's your favorite way to unwind after a hard day?
+50	other	self-improvement	What's a routine you have that other people find weird?
+51	career-academics	self-improvement	What's a mistake you made that you're glad you made?
+52	health-body	self-improvement	What's one thing you do every morning without fail?
+53	career-academics	work-school	What's the best job you've ever had, even briefly?
+54	career-academics	work-school	What's a class you wish you'd taken but never did?
+55	daily-life	work-school	What's your favorite part of your current job?
+56	career-academics	work-school	Who was the best teacher or professor you ever had?
+57	other	work-school	What's the weirdest job you've ever had?
+58	career-academics	work-school	What's a work skill you're actually really good at?
+59	daily-life	work-school	What's your ideal way to spend a lunch break?
+60	career-academics	work-school	What's the most useless thing you learned in school that somehow stuck with you?
+61	hobbies-interests	play	What's a hobby you'd pick up if you had a free afternoon every week?
+62	relationships-friends	play	What's your go-to karaoke song?
+63	other	play	What's a sport you actually enjoy watching?
+64	relationships-friends	play	What's the most fun you've had at a party this year?
+65	health-body	body	What's your favorite way to move your body when you're not forcing yourself?
+66	tastes-preferences	body	What's a food that always makes you feel good afterward?
+67	daily-life	body	What's your ideal amount of sleep, and do you actually get it?
+68	health-body	body	Hot or cold: which weather makes your body feel best?
+69	health-body	body	What's a stretch or move that always feels amazing?
+70	daily-life	body	What's your go-to way to fall asleep faster?
+71	health-body	body	What's the most refreshed you've felt after a workout or walk?
+72	daily-life	body	What's your favorite way to spend a lazy morning in bed?
+73	daily-life	home	What's your favorite room in your home right now?
+74	daily-life	home	What's one thing on your home wishlist you haven't bought yet?
+75	daily-life	home	What's your ideal temperature for the house?
+76	daily-life	home	What's your favorite way to spend a rainy day at home?
+77	daily-life	home	What's a household chore you actually don't mind doing?
+78	other	home	What's the coziest corner of your home?
+79	daily-life	home	What's your go-to background noise while you're home alone: music, TV, or silence?
+80	hobbies-interests	media	What's a show you've rewatched more than once?
+81	hobbies-interests	media	What's the last book you actually finished?
+82	daily-life	media	What's a movie you could watch anytime it's on?
+83	childhood	media	Who's your favorite fictional character of all time?
+84	plans-future	media	What's a podcast or YouTube channel you never miss?
+85	hobbies-interests	media	What's a song that instantly puts you in a good mood?
+86	hobbies-interests	media	What's a show you're currently in the middle of?
+87	daily-life	daily-mechanics	What's the first thing you do when you get home from work?
+88	hobbies-interests	events-outings	What's your favorite kind of weekend outing?
+89	relationships-friends	events-outings	What's the best trip you've taken with friends?
+90	other	events-outings	What's a local spot you always recommend to visitors?
+91	hobbies-interests	events-outings	What's your favorite kind of place to explore on vacation: beach, city, or mountains?
+92	other	events-outings	What's the best random errand-turned-adventure you've had?
+93	family	events-outings	What's your favorite thing to do with family when everyone's together?
+94	plans-future	events-outings	What's a festival or event you'd love to go to someday?
+95	hobbies-interests	events-outings	What's your favorite way to spend a Sunday afternoon?
+96	other	events-outings	What's the best day trip you've ever taken?
+97	other	money	What's the best deal you've ever gotten on something?
+98	daily-life	money	What's a subscription you're genuinely glad you pay for?
+99	beliefs-values	money	What's something you splurge on without any guilt?
+100	plans-future	money	What's something you're saving up for right now?
+101	other	money	What's the best free thing you've ever gotten?
+102	health-body	money	What's your favorite way to treat yourself after a good week?
+103	other	money	What's a purchase you still think about years later?
+104	career-academics	money	What's the first big purchase you remember being excited about?
+105	tastes-preferences	money	What's a brand you'll always choose over a cheaper option?
+106	plans-future	plans	What's a trip you're hoping to take in the next year?
+107	plans-future	plans	What's on your bucket list that you actually plan to do?
+108	daily-life	plans	What's something you're looking forward to this month?
+109	plans-future	plans	If you had a free weekend with no plans, what would you do first?
+110	career-academics	plans	What's a goal you're working toward right now?
+111	hobbies-interests	plans	What's something new you want to try this year?
+112	plans-future	plans	Where do you want to be living five years from now?
+113	plans-future	plans	What's the next trip you're actually planning to book?
+114	family	values-beliefs	What's a small tradition or ritual you never want to give up?
+115	beliefs-values	values-beliefs	What's something you believe makes a house a home?
+116	relationships-friends	values-beliefs	What's a quality you admire most in the people you're close to?
+117	beliefs-values	values-beliefs	What's a rule you live by that most people would find odd?
+118	beliefs-values	values-beliefs	What's something small that always restores your faith in people?
+119	family	values-beliefs	What's a value your parents passed down that you still hold onto?
+120	beliefs-values	values-beliefs	What's something you think is underrated about kindness?
+121	beliefs-values	values-beliefs	What's a piece of wisdom you'd want to pass on to a kid?
+122	relationships-friends	romance	What's your idea of a perfect low-key date night?
+123	relationships-friends	romance	What's a small gesture that always feels romantic to you?
+124	other	romance	What's your favorite memory from when we first started dating?
+125	relationships-friends	romance	What's the best compliment you've ever gotten from a partner?
+126	daily-life	romance	What's your favorite way to spend a lazy Sunday together?
+127	hobbies-interests	romance	What's a movie or song that always feels romantic to you?
+128	other	romance	What's your favorite inside joke we have?
+129	relationships-friends	romance	What's the most fun double date you can imagine?
+130	daily-life	romance	What's a small thing I do that always makes you smile?

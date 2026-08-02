@@ -1,10 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { AdaptivePromptSource } from "../src/prompts/adaptive";
+import { AdaptivePromptSource, type SelectionDeps } from "../src/prompts/adaptive";
 import { Ledger, type NodeDomain } from "../src/ledger/ledger";
-import { LedgerOntology } from "../src/ontology/ledgerOntology";
-import type { OntologyView } from "../src/ontology/types";
 import type { PersonId } from "../src/config";
 import type { LlmClient } from "../src/llm/types";
+import type { Candidate, Selection, SelectionConstants, SelectionInput, SeedRow } from "../src/selection/types";
 
 function scriptedLlm(behavior: (userPrompt: string) => string | Promise<string>) {
   const calls: { system: string; user: string }[] = [];
@@ -17,66 +16,59 @@ function scriptedLlm(behavior: (userPrompt: string) => string | Promise<string>)
   return { client, calls };
 }
 
-/** The explore list is the thinnest domains, so for a person with no nodes at
- * all every domain ties at zero and ALL_DOMAINS order breaks the tie. This is
- * the first entry, hence always offered to an empty person. */
-const OFFERED_DOMAIN = "career-academics";
+const CONSTANTS: SelectionConstants = {
+  settlingDays: 2,
+  subjectCooldownDays: 14,
+  domainCooldownDays: 4,
+  familyCooldownDays: 7,
+  tokenWindowDays: 3,
+  exploitRunCap: 2,
+  budgetCap: 3,
+  candidateDepth: 8,
+  seedReuseDays: 90,
+  anchorMinSharedWords: 1,
+};
 
-/** A domain deliberately absent from an empty person's offered explore list
- * (which holds only the first three), for the unoffered-target cases. */
-const UNOFFERED_DOMAIN = "health-body";
+const emptySelectionInput = (today: string): SelectionInput => ({
+  nodes: { a: [], b: [] },
+  asks: [],
+  seeds: [],
+  usedSeedIds: { a: new Set(), b: new Set() },
+  tokens: [],
+  constants: CONSTANTS,
+  today,
+});
 
-/** Exactly one target may be non-null and it must match the assigned stance,
- * so citing a node id clears the domain rather than leaving both set. */
-const target = (nodeId: number | null | undefined, explore: string | null | undefined) =>
-  nodeId != null
-    ? { targetNodeId: nodeId, targetExplore: null }
-    : { targetNodeId: null, targetExplore: explore === undefined ? OFFERED_DOMAIN : explore };
+const emptyBackground: Selection["background"] = { a: [], b: [] };
 
-function okResponse(opts: {
-  a: string;
-  b: string;
-  theme?: string | null;
-  usedIdeaId?: number | null;
-  stanceA?: string;
-  stanceB?: string;
-  topicA?: string;
-  topicB?: string;
-  targetNodeIdA?: number | null;
-  targetNodeIdB?: number | null;
-  targetExploreA?: string | null;
-  targetExploreB?: string | null;
-}) {
-  const {
-    a, b, theme = "shared theme", usedIdeaId = null,
-    stanceA = "explore", stanceB = "explore",
-    // Distinct by default so the topic-repeat guard does not fire on
-    // fixtures that are not about topic repetition.
-    topicA = "topic-a", topicB = "topic-b",
-    targetNodeIdA, targetNodeIdB, targetExploreA, targetExploreB,
-  } = opts;
-  return JSON.stringify({
-    theme,
-    a: { prompt: a, stance: stanceA, topic: topicA, ...target(targetNodeIdA, targetExploreA) },
-    b: { prompt: b, stance: stanceB, topic: topicB, ...target(targetNodeIdB, targetExploreB) },
-    rationale: "test rationale",
-    usedIdeaId,
-  });
+/** Builds an "exploit" (lane 1) candidate from a node already filed in the
+ * ledger, reading it back through the real selectableNodes shape so tests
+ * exercise the exact fields production reads. */
+function exploitCandidate(ledger: Ledger, person: PersonId, nodeId: number): Candidate {
+  const node = ledger.selectableNodes(person).find((n) => n.id === nodeId)!;
+  return { person, lane: "exploit", node, seed: null, token: null, domain: node.domain, family: node.family };
 }
 
-function makeSource(ledger: Ledger, client: LlmClient) {
-  return new AdaptivePromptSource(new LedgerOntology(ledger), client, ledger, {
-    model: "test-model",
-    historyWindowDays: 14,
-    feedbackWindowDays: 14,
-    contextBudgetChars: 3000,
-    names: { a: "Alex", b: "Sam" },
-  });
+/** Builds a "followup" (lane 0) candidate: mints a real token in the ledger
+ * and reads it back via fireableTokens, matching Candidate's own contract
+ * that a followup candidate carries a token, not a SelectableNode. */
+function followupCandidate(
+  ledger: Ledger,
+  person: PersonId,
+  nodeId: number,
+  eventDate: string,
+  today: string,
+): Candidate {
+  ledger.mintToken(nodeId, eventDate, "t0");
+  const token = ledger.fireableTokens(today, CONSTANTS.tokenWindowDays).find((t) => t.nodeId === nodeId)!;
+  const node = ledger.selectableNodes(person).find((n) => n.id === nodeId)!;
+  return { person, lane: "followup", node: null, seed: null, token, domain: node.domain, family: node.family };
 }
 
-/** An open node out of cooldown IS exploitability now, so seeding one is the
- * whole mechanism for making a person exploitable (it replaces seeding a
- * "thread" observation into a memory backend). */
+function exploreCandidate(person: PersonId, seed: SeedRow): Candidate {
+  return { person, lane: "explore", node: null, seed, token: null, domain: seed.domain, family: seed.family };
+}
+
 function seedNode(
   ledger: Ledger,
   person: PersonId,
@@ -90,407 +82,412 @@ function seedNode(
     eventDate: null,
     at: "t",
   });
-  for (const f of opts.facts ?? [{ date: "2026-07-19", text: "Nervous about their defense in August." }]) {
+  for (const f of opts.facts ?? [{ date: "2026-07-10", text: "Nervous about their defense in August." }]) {
     ledger.addNodeFact({ nodeId: id, kind: "fact", text: f.text, sourceDayId: 1, observedDate: f.date, at: "t" });
   }
   return id;
 }
 
-describe("AdaptivePromptSource", () => {
-  test("returns DailyPrompts with per-person ids and texts on success", async () => {
+function makeSeed(ledger: Ledger, id: number, text: string, domain: string, family: string): SeedRow {
+  ledger.replaceSeeds([{ id, text, domain, family }]);
+  return ledger.allSeeds().find((s) => s.id === id)!;
+}
+
+function expectedFields(c: Candidate): { targetNodeId: number | null; seedId: number | null } {
+  if (c.lane === "explore") return { targetNodeId: null, seedId: c.seed!.id };
+  const nodeId = c.node?.id ?? c.token?.nodeId ?? null;
+  return { targetNodeId: nodeId, seedId: null };
+}
+
+function responseFor(
+  sel: Selection,
+  opts: {
+    aPrompt: string;
+    bPrompt: string;
+    theme?: string | null;
+    usedIdeaId?: number | null;
+    aTargetNodeId?: number | null;
+    aSeedId?: number | null;
+    bTargetNodeId?: number | null;
+    bSeedId?: number | null;
+  },
+): string {
+  const expectedA = expectedFields(sel.a);
+  const expectedB = expectedFields(sel.b);
+  return JSON.stringify({
+    theme: opts.theme === undefined ? "shared theme" : opts.theme,
+    a: {
+      prompt: opts.aPrompt,
+      targetNodeId: opts.aTargetNodeId !== undefined ? opts.aTargetNodeId : expectedA.targetNodeId,
+      seedId: opts.aSeedId !== undefined ? opts.aSeedId : expectedA.seedId,
+    },
+    b: {
+      prompt: opts.bPrompt,
+      targetNodeId: opts.bTargetNodeId !== undefined ? opts.bTargetNodeId : expectedB.targetNodeId,
+      seedId: opts.bSeedId !== undefined ? opts.bSeedId : expectedB.seedId,
+    },
+    rationale: "test rationale",
+    usedIdeaId: opts.usedIdeaId ?? null,
+  });
+}
+
+function makeSource(
+  ledger: Ledger,
+  client: LlmClient,
+  sel: Selection,
+  overrides: Partial<SelectionDeps> = {},
+): AdaptivePromptSource {
+  const deps: SelectionDeps = {
+    buildSelectionInput: (date) => emptySelectionInput(date),
+    selectPair: () => sel,
+    checkAnchor: () => true,
+    ...overrides,
+  };
+  return new AdaptivePromptSource(deps, client, ledger, {
+    model: "test-model",
+    historyWindowDays: 14,
+    feedbackWindowDays: 14,
+    names: { a: "Alex", b: "Sam" },
+    constants: CONSTANTS,
+  });
+}
+
+describe("AdaptivePromptSource happy path", () => {
+  test("an exploit/explore pair produces DailyPrompts and echoes the assigned target ids", async () => {
     const ledger = Ledger.open(":memory:");
-    const { client } = scriptedLlm(() => okResponse({ a: "What made you smile today?", b: "What made you laugh today?" }));
-    const source = makeSource(ledger, client);
-    const result = await source.nextPrompts("2026-07-20");
-    expect(result.prompts.a).toEqual({ id: "gen-2026-07-20-a", text: "What made you smile today?" });
-    expect(result.prompts.b).toEqual({ id: "gen-2026-07-20-b", text: "What made you laugh today?" });
+    const nodeId = seedNode(ledger, "a");
+    const seed = makeSeed(ledger, 1, "What's your favorite way to spend a lazy Sunday?", "daily-life", "plans");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
+
+    const { client, calls } = scriptedLlm(() => responseFor(sel, { aPrompt: "How did the defense go?", bPrompt: "What's your favorite lazy Sunday?" }));
+    const result = await makeSource(ledger, client, sel).nextPrompts("2026-07-20");
+
+    expect(calls.length).toBe(1);
+    expect(result.prompts.a).toEqual({ id: "gen-2026-07-20-a", text: "How did the defense go?" });
+    expect(result.prompts.b).toEqual({ id: "gen-2026-07-20-b", text: "What's your favorite lazy Sunday?" });
     expect(result.theme).toBe("shared theme");
   });
 
-  test("one LLM call produces two different prompt texts for the two people", async () => {
+  test("a followup (lane 0) target is built from the token's node and echoed as targetNodeId", async () => {
     const ledger = Ledger.open(":memory:");
-    const { client, calls } = scriptedLlm(() => okResponse({ a: "question for Alex", b: "question for Sam" }));
-    const result = await makeSource(ledger, client).nextPrompts("2026-07-20");
-    expect(calls.length).toBe(1);
-    expect(result.prompts.a.text).not.toBe(result.prompts.b.text);
-  });
-
-  test("reads each person's candidates so their own node facts reach the prompt", async () => {
-    const ledger = Ledger.open(":memory:");
-    const nodeId = seedNode(ledger, "a", { facts: [{ date: "2026-07-18", text: "Bakes sourdough most weekends." }] });
-    const { client, calls } = scriptedLlm(() => okResponse({ a: "p", b: "q", targetNodeIdA: nodeId }));
-    await makeSource(ledger, client).nextPrompts("2026-07-20");
-    expect(calls[0]!.user).toContain("Bakes sourdough most weekends.");
+    const nodeId = seedNode(ledger, "a", { summary: "Cora's psychic party was last weekend." });
+    const seed = makeSeed(ledger, 2, "What's a small ritual you love?", "daily-mechanics", "home");
+    const sel: Selection = {
+      a: followupCandidate(ledger, "a", nodeId, "2026-07-19", "2026-07-20"),
+      b: exploreCandidate("b", seed),
+      relaxations: [],
+      background: emptyBackground,
+    };
+    const { client, calls } = scriptedLlm(() => responseFor(sel, { aPrompt: "How did the psychic party go?", bPrompt: "What's a small ritual you love?" }));
+    const result = await makeSource(ledger, client, sel).nextPrompts("2026-07-20");
+    expect(result.prompts.a.text).toBe("How did the psychic party go?");
     expect(calls[0]!.user).toContain(`[node ${nodeId}]`);
   });
 
-  test("records two generation_log rows on success, one per person, sharing model/response/rationale", async () => {
+  test("the writer prompt renders the node's dated kind-tagged facts, not a candidate menu", async () => {
     const ledger = Ledger.open(":memory:");
-    const { client } = scriptedLlm(() => okResponse({ a: "What's a small win from today?", b: "What's a small win you saw someone else have?" }));
-    const source = makeSource(ledger, client);
-    await source.nextPrompts("2026-07-20");
+    const nodeId = seedNode(ledger, "a", { facts: [{ date: "2026-07-10", text: "Bakes sourdough most weekends." }] });
+    const seed = makeSeed(ledger, 3, "What's a place you keep meaning to visit?", "plans", "plans");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
+    const { client, calls } = scriptedLlm(() => responseFor(sel, { aPrompt: "How's the sourdough going?", bPrompt: "Anywhere you'd love to visit?" }));
+    await makeSource(ledger, client, sel).nextPrompts("2026-07-20");
+    expect(calls[0]!.user).toContain("[2026-07-10] (fact) Bakes sourdough most weekends.");
+    expect(calls[0]!.user).not.toContain("EXPLOIT CANDIDATES");
+    expect(calls[0]!.user).not.toContain("EXPLORE CANDIDATES");
+    expect(calls[0]!.user).not.toContain("OFF LIMITS");
+  });
+});
+
+describe("bookkeeping", () => {
+  test("records lane, target ids, seedId, askDomain, askFamily and stance backward-compat values on both rows", async () => {
+    const ledger = Ledger.open(":memory:");
+    const nodeId = seedNode(ledger, "a", { domain: "career-academics" });
+    const seed = makeSeed(ledger, 4, "What's your comfort food?", "food", "food");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
+    const { client } = scriptedLlm(() => responseFor(sel, { aPrompt: "How did the defense go?", bPrompt: "What's your comfort food?" }));
+    await makeSource(ledger, client, sel).nextPrompts("2026-07-20");
+
     const rows = ledger.generationLogFor("2026-07-20");
-    expect(rows.length).toBe(2);
     const rowA = rows.find((r) => r.person === "a")!;
     const rowB = rows.find((r) => r.person === "b")!;
-    expect(rowA).toMatchObject({
-      model: "test-model",
-      promptId: "gen-2026-07-20-a",
-      promptText: "What's a small win from today?",
-      rationale: "test rationale",
-      stance: "explore",
-      fellBack: false,
-    });
-    expect(rowB).toMatchObject({
-      model: "test-model",
-      promptId: "gen-2026-07-20-b",
-      promptText: "What's a small win you saw someone else have?",
-      rationale: "test rationale",
-      stance: "explore",
-      fellBack: false,
-    });
+    expect(rowA).toMatchObject({ lane: "exploit", targetNodeId: nodeId, seedId: null, askDomain: "career-academics", stance: "exploit" });
+    expect(rowB).toMatchObject({ lane: "explore", targetNodeId: null, seedId: seed.id, askDomain: "food", askFamily: "food", stance: "explore" });
   });
 
-  test("rejects a response with no declared stance for a person, so the ratio stays measurable", async () => {
-    const ledger = Ledger.open(":memory:");
-    const { client } = scriptedLlm(() =>
-      JSON.stringify({
-        theme: "t",
-        a: { prompt: "What's a small win from today?", targetNodeId: null, targetExplore: OFFERED_DOMAIN },
-        b: { prompt: "What's a small win you saw?", stance: "explore", topic: "t-b", targetNodeId: null, targetExplore: OFFERED_DOMAIN },
-        rationale: "r",
-        usedIdeaId: null,
-      }),
-    );
-    await expect(makeSource(ledger, client).nextPrompts("2026-07-20")).rejects.toThrow();
-  });
-
-  test("rejects a stance outside explore/exploit rather than storing free text", async () => {
-    const ledger = Ledger.open(":memory:");
-    const { client } = scriptedLlm(() => okResponse({ a: "What's a small win?", b: "What's a small loss?", stanceA: "a bit of both" }));
-    await expect(makeSource(ledger, client).nextPrompts("2026-07-20")).rejects.toThrow();
-  });
-
-  test("a malformed response missing the b prompt is rejected", async () => {
-    const ledger = Ledger.open(":memory:");
-    const { client } = scriptedLlm(() =>
-      JSON.stringify({ theme: "t", a: { prompt: "qa", stance: "explore" }, rationale: "r", usedIdeaId: null }),
-    );
-    await expect(makeSource(ledger, client).nextPrompts("2026-07-20")).rejects.toThrow();
-  });
-
-  test("on an exploit day, a person with an exploit candidate is assigned exploit while a person with none is assigned explore", async () => {
+  test("a followup lane row records stance exploit (the two-way backward-compat label) with lane followup", async () => {
     const ledger = Ledger.open(":memory:");
     const nodeId = seedNode(ledger, "a");
-    // Declares explore for both; the assigned per-person stance is what gets
-    // recorded, so a disagreeing model cannot quietly reintroduce the
-    // all-explore drift.
-    const { client, calls } = scriptedLlm(() =>
-      okResponse({ a: "How did the defense go?", b: "What's a small win from today?", targetNodeIdA: nodeId }),
-    );
-    await makeSource(ledger, client).nextPrompts("2026-07-20");
-    const rows = ledger.generationLogFor("2026-07-20");
-    expect(rows.find((r) => r.person === "a")!.stance).toBe("exploit");
-    expect(rows.find((r) => r.person === "b")!.stance).toBe("explore");
-    expect(calls[0]!.user).toContain("EXPLOIT");
-  });
-
-  test("assigns explore to both people when neither has an exploit candidate", async () => {
-    const ledger = Ledger.open(":memory:");
-    const { client } = scriptedLlm(() => okResponse({ a: "What's a small win from today?", b: "What's a small win from today?" }));
-    await makeSource(ledger, client).nextPrompts("2026-07-20");
-    const rows = ledger.generationLogFor("2026-07-20");
-    expect(rows.find((r) => r.person === "a")!.stance).toBe("explore");
-    expect(rows.find((r) => r.person === "b")!.stance).toBe("explore");
-  });
-
-  test("retries when person A's generated prompt near-duplicates one already sent to A", async () => {
-    const ledger = Ledger.open(":memory:");
-    const day = ledger.createDay("2026-07-19", "p1", "What's an unexpected sound or noise you secretly enjoy?", "t");
-    ledger.resolveDay(day.id, "resolved_shared", "t2");
-    let call = 0;
-    const { client } = scriptedLlm(() => {
-      call++;
-      return call === 1
-        ? okResponse({ a: "What's an unexpected sound you secretly enjoy?", b: "What's your favorite drink?" })
-        : okResponse({ a: "What's a place you keep meaning to visit?", b: "What's your favorite drink?" });
-    });
-    const result = await makeSource(ledger, client).nextPrompts("2026-07-20");
-    expect(call).toBe(2);
-    expect(result.prompts.a.text).toBe("What's a place you keep meaning to visit?");
-  });
-
-  test("does not retry when A's prompt only near-duplicates something B was asked", async () => {
-    // The no-repeat rule is per person now: A has never seen B's question,
-    // so reusing it for A is novel to the person who receives it.
-    const ledger = Ledger.open(":memory:");
-    const day = ledger.createDay("2026-07-19", "p1", "day theme", "t");
-    ledger.setPersonPrompt(day.id, "a", "p1-a", "What's a book you keep meaning to finish?");
-    ledger.setPersonPrompt(day.id, "b", "p1-b", "What's an unexpected sound or noise you secretly enjoy?");
-    ledger.resolveDay(day.id, "resolved_shared", "t2");
-    const { client, calls } = scriptedLlm(() =>
-      okResponse({ a: "What's an unexpected sound you secretly enjoy?", b: "Which room in your place do you like best?" }),
-    );
-    const result = await makeSource(ledger, client).nextPrompts("2026-07-20");
-    expect(calls.length).toBe(1);
-    expect(result.prompts.a.text).toBe("What's an unexpected sound you secretly enjoy?");
-  });
-
-  test("throws when the LLM call itself rejects", async () => {
-    const ledger = Ledger.open(":memory:");
-    const client: LlmClient = { async complete() { throw new Error("network down"); } };
-    const source = makeSource(ledger, client);
-    await expect(source.nextPrompts("2026-07-20")).rejects.toThrow(/network down/);
-  });
-
-  test("throws when the LLM response is not valid JSON after retries are exhausted", async () => {
-    const ledger = Ledger.open(":memory:");
-    const { client } = scriptedLlm(() => "not json");
-    const source = makeSource(ledger, client);
-    await expect(source.nextPrompts("2026-07-20")).rejects.toThrow();
-  });
-
-  test("retries in-process on a single transient malformed response, then succeeds", async () => {
-    let calls = 0;
-    const client: LlmClient = {
-      async complete() {
-        calls++;
-        if (calls < 2) return "not json";
-        return okResponse({ a: "recovered prompt a", b: "recovered prompt b" });
-      },
+    const seed = makeSeed(ledger, 5, "What's a book on your shelf you haven't read?", "media", "media");
+    const sel: Selection = {
+      a: followupCandidate(ledger, "a", nodeId, "2026-07-19", "2026-07-20"),
+      b: exploreCandidate("b", seed),
+      relaxations: [],
+      background: emptyBackground,
     };
-    const ledger = Ledger.open(":memory:");
-    const source = makeSource(ledger, client);
-    const result = await source.nextPrompts("2026-07-20");
-    expect(result.prompts.a.text).toBe("recovered prompt a");
-    expect(calls).toBe(2);
+    const { client } = scriptedLlm(() => responseFor(sel, { aPrompt: "How did it go?", bPrompt: "What book is next?" }));
+    await makeSource(ledger, client, sel).nextPrompts("2026-07-20");
+    const rowA = ledger.generationLogFor("2026-07-20").find((r) => r.person === "a")!;
+    expect(rowA.lane).toBe("followup");
+    expect(rowA.stance).toBe("exploit");
   });
 
-  test("propagates when the ontology read throws, rather than generating without candidates", async () => {
+  test("an exploit (lane 1) target decrements budget and records last_asked via recordAsk", async () => {
     const ledger = Ledger.open(":memory:");
-    const brokenOntology: OntologyView = {
-      candidates() { throw new Error("ontology read failed"); },
-      nodeExists() { return false; },
-    };
-    const { client } = scriptedLlm(() => okResponse({ a: "p", b: "q" }));
-    const source = new AdaptivePromptSource(brokenOntology, client, ledger, {
-      model: "m", historyWindowDays: 14, feedbackWindowDays: 14, contextBudgetChars: 3000, names: { a: "Alex", b: "Sam" },
-    });
-    await expect(source.nextPrompts("2026-07-20")).rejects.toThrow(/ontology read failed/);
+    const nodeId = seedNode(ledger, "a");
+    ledger.setNodeBudget(nodeId, 2, "t");
+    const seed = makeSeed(ledger, 6, "What's your favorite smell?", "nostalgia", "nostalgia");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
+    const { client } = scriptedLlm(() => responseFor(sel, { aPrompt: "How did the defense go?", bPrompt: "What's your favorite smell?" }));
+    await makeSource(ledger, client, sel).nextPrompts("2026-07-20");
+    const node = ledger.nodesFor("a").find((n) => n.id === nodeId)!;
+    expect(node.lastAsked).toBe("2026-07-20");
+    expect(node.budget).toBe(1);
   });
 
-  test("day 1 / empty graph for both people still produces a valid generated pair (pure exploration)", async () => {
+  test("a followup (lane 0) target spends the token and skips recordAsk entirely, so budget does not move", async () => {
     const ledger = Ledger.open(":memory:");
-    const { client } = scriptedLlm(() => okResponse({ a: "What's something you're curious about lately?", b: "What's something you'd like to try?" }));
-    const source = makeSource(ledger, client);
-    const result = await source.nextPrompts("2026-07-20");
-    expect(result.prompts.a.text).toBe("What's something you're curious about lately?");
-    expect(result.prompts.b.text).toBe("What's something you'd like to try?");
-  });
+    const nodeId = seedNode(ledger, "a");
+    ledger.setNodeBudget(nodeId, 2, "t");
+    const seed = makeSeed(ledger, 7, "What's a scent that brings back a memory?", "nostalgia", "nostalgia");
+    const followup = followupCandidate(ledger, "a", nodeId, "2026-07-19", "2026-07-20");
+    const sel: Selection = { a: followup, b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
+    const { client } = scriptedLlm(() => responseFor(sel, { aPrompt: "How did it go?", bPrompt: "What scent takes you back?" }));
+    await makeSource(ledger, client, sel).nextPrompts("2026-07-20");
 
-  test("recent prompt history passed to the LLM is capped at historyWindowDays, for each person", async () => {
-    const ledger = Ledger.open(":memory:");
-    for (let i = 1; i <= 20; i++) {
-      ledger.createDay(`2026-06-${String(i).padStart(2, "0")}`, `p${i}`, `prompt ${i}`, "t");
-    }
-    const { client, calls } = scriptedLlm(() => okResponse({ a: "p", b: "q" }));
-    const source = new AdaptivePromptSource(new LedgerOntology(ledger), client, ledger, {
-      model: "m", historyWindowDays: 3, feedbackWindowDays: 14, contextBudgetChars: 3000, names: { a: "Alex", b: "Sam" },
-    });
-    await source.nextPrompts("2026-07-01");
-    const user = calls[0]!.user;
-    const alexSection = user.slice(user.indexOf("PERSON A:"), user.indexOf("PERSON B:"));
-    const historyLines = alexSection.split("\n").filter((l) => l.trim().startsWith("["));
-    expect(historyLines.length).toBe(3);
-  });
-
-  test("does not record a generation_log row when generation throws (log-on-success-only)", async () => {
-    const ledger = Ledger.open(":memory:");
-    const { client } = scriptedLlm(() => "not json");
-    const source = makeSource(ledger, client);
-    await expect(source.nextPrompts("2026-07-20")).rejects.toThrow();
-    expect(ledger.generationLogFor("2026-07-20")).toEqual([]);
+    const node = ledger.nodesFor("a").find((n) => n.id === nodeId)!;
+    // Budget and last_asked are untouched: recordAsk was never called.
+    expect(node.budget).toBe(2);
+    expect(node.lastAsked).toBeNull();
+    const spent = ledger.fireableTokens("2026-07-23", 10).find((t) => t.id === followup.token!.id);
+    expect(spent).toBeUndefined(); // fireableTokens only returns unspent tokens
   });
 
   test("using an unconsumed prompt idea marks it consumed", async () => {
     const ledger = Ledger.open(":memory:");
     const day = ledger.createDay("2026-07-18", "p1", "x", "t");
     const ideaId = ledger.addPromptIdea("a", "ask about our Tokyo trip", day.id, "t1");
-    const { client } = scriptedLlm(() => okResponse({ a: "How's Tokyo trip planning going?", b: "What's a trip you'd love to take?", usedIdeaId: ideaId }));
-    const source = makeSource(ledger, client);
-    await source.nextPrompts("2026-07-20");
+    const nodeId = seedNode(ledger, "a");
+    const seed = makeSeed(ledger, 8, "What's a trip you'd love to take?", "plans", "plans");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
+    const { client } = scriptedLlm(() => responseFor(sel, { aPrompt: "How's Tokyo trip planning going?", bPrompt: "What's a trip you'd love?", usedIdeaId: ideaId }));
+    await makeSource(ledger, client, sel).nextPrompts("2026-07-20");
     expect(ledger.unconsumedPromptIdeas("a")).toEqual([]);
   });
-
-  test("an invalid usedIdeaId (not a real unconsumed idea) is ignored, not an error", async () => {
-    const ledger = Ledger.open(":memory:");
-    const { client } = scriptedLlm(() => okResponse({ a: "some prompt", b: "another prompt", usedIdeaId: 9999 }));
-    const source = makeSource(ledger, client);
-    await expect(source.nextPrompts("2026-07-20")).resolves.toBeDefined();
-  });
 });
 
-describe("declared-target validation", () => {
-  test("an exploit citing a node id that was not offered is rejected and retried", async () => {
+describe("strict-equality target validation", () => {
+  test("a mismatched targetNodeId is rejected and retried with the reason in the next attempt", async () => {
     const ledger = Ledger.open(":memory:");
     const nodeId = seedNode(ledger, "a");
+    const seed = makeSeed(ledger, 9, "What did you cook this week?", "food", "food");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
     let call = 0;
-    const { client } = scriptedLlm(() => {
+    const { client, calls } = scriptedLlm(() => {
       call++;
-      // 4242 is not in A's candidate list, so the attribution would be a
-      // fabrication: the whole generation is thrown away instead.
       return call === 1
-        ? okResponse({ a: "How did the defense go?", b: "What did you cook?", targetNodeIdA: 4242 })
-        : okResponse({ a: "How did the defense go?", b: "What did you cook?", targetNodeIdA: nodeId });
+        ? responseFor(sel, { aPrompt: "How did the defense go?", bPrompt: "What did you cook?", aTargetNodeId: 4242 })
+        : responseFor(sel, { aPrompt: "How did the defense go?", bPrompt: "What did you cook?" });
     });
-    const result = await makeSource(ledger, client).nextPrompts("2026-07-20");
+    const result = await makeSource(ledger, client, sel).nextPrompts("2026-07-20");
     expect(call).toBe(2);
     expect(result.prompts.a.text).toBe("How did the defense go?");
-    expect(ledger.generationLogFor("2026-07-20").find((r) => r.person === "a")!.targetNodeId).toBe(nodeId);
+    expect(calls[1]!.user).toContain("PREVIOUS ATTEMPT WAS REJECTED");
+    expect(calls[1]!.user).toContain("declared targetNodeId 4242");
   });
 
-  test("an explore citing a domain that was not offered is rejected and retried", async () => {
+  test("a FINAL-attempt target mismatch throws instead of shipping unattributed", async () => {
     const ledger = Ledger.open(":memory:");
-    let call = 0;
-    const { client } = scriptedLlm(() => {
-      call++;
-      return call === 1
-        ? okResponse({ a: "What's your favorite thing to cook?", b: "When did you last swim?", targetExploreA: UNOFFERED_DOMAIN })
-        : okResponse({ a: "What's your favorite thing to cook?", b: "When did you last swim?", targetExploreA: OFFERED_DOMAIN });
-    });
-    await makeSource(ledger, client).nextPrompts("2026-07-20");
-    expect(call).toBe(2);
-    expect(ledger.generationLogFor("2026-07-20").find((r) => r.person === "a")!.targetDomain).toBe(OFFERED_DOMAIN);
-  });
-
-  test("on the final attempt an invalid target ships the question with a null recorded target", async () => {
-    // The question itself is probably fine; blocking dispatch over the
-    // bookkeeping would cost the day's ritual, so the row records no target.
-    const ledger = Ledger.open(":memory:");
-    seedNode(ledger, "a");
+    const nodeId = seedNode(ledger, "a");
+    const seed = makeSeed(ledger, 10, "What's a good song right now?", "media", "media");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
     const { client, calls } = scriptedLlm(() =>
-      okResponse({ a: "How did the defense go?", b: "When did you last swim?", targetNodeIdA: 4242 }),
+      responseFor(sel, { aPrompt: "How did the defense go?", bPrompt: "Favorite song?", aTargetNodeId: 4242 }),
     );
-    const result = await makeSource(ledger, client).nextPrompts("2026-07-20");
-    expect(calls.length).toBe(4); // MAX_ATTEMPTS: the miss burns every retry before shipping
-    expect(result.prompts.a.text).toBe("How did the defense go?");
-    const rowA = ledger.generationLogFor("2026-07-20").find((r) => r.person === "a")!;
-    expect(rowA.targetNodeId).toBeNull();
-    expect(rowA.targetDomain).toBeNull();
-    // Nothing was asked about, so nothing may go into cooldown either.
-    expect(ledger.nodesFor("a")[0]!.lastAsked).toBeNull();
+    await expect(makeSource(ledger, client, sel).nextPrompts("2026-07-20")).rejects.toThrow(/FINAL-attempt target mismatch/);
+    expect(calls.length).toBe(4); // MAX_ATTEMPTS: the miss burns every retry before throwing
+    // Nothing was recorded: the caller (FallbackPromptSource) is what
+    // degrades, and it must see no partial generation_log row.
+    expect(ledger.generationLogFor("2026-07-20")).toEqual([]);
   });
 
-  test("a valid exploit records the target and moves that node's last_asked at dispatch", async () => {
+  test("declaring both targetNodeId and seedId is rejected", async () => {
     const ledger = Ledger.open(":memory:");
     const nodeId = seedNode(ledger, "a");
-    const { client } = scriptedLlm(() =>
-      okResponse({ a: "How did the defense go?", b: "When did you last swim?", targetNodeIdA: nodeId }),
-    );
-    await makeSource(ledger, client).nextPrompts("2026-07-20");
-    const rowA = ledger.generationLogFor("2026-07-20").find((r) => r.person === "a")!;
-    expect(rowA.targetNodeId).toBe(nodeId);
-    expect(rowA.targetDomain).toBeNull();
-    const node = ledger.nodesFor("a").find((n) => n.id === nodeId)!;
-    expect(node.lastAsked).toBe("2026-07-20");
-    // times_asked deliberately waits for finalization so the count cannot
-    // drift ahead of the answers behind the yield mean.
-    expect(node.timesAsked).toBe(0);
-  });
-});
-
-describe("repetition guards", () => {
-  test("retries when a person's topic repeats one of their recent subjects", async () => {
-    // The live failure: four self-improvement questions in six days, each
-    // sharing almost no vocabulary with the last, so Jaccard saw nothing.
-    const ledger = Ledger.open(":memory:");
-    ledger.recordGeneration({
-      date: "2026-07-19", promptId: "g", promptText: "q", model: "m", systemPrompt: "s",
-      userPrompt: "u", rawResponse: "{}", rationale: "r", stance: "explore",
-      person: "a", topic: "self-improvement", targetNodeId: null, targetDomain: null, fellBack: false, fallbackReason: null, at: "t",
-    });
+    const seed = makeSeed(ledger, 11, "What's your go-to snack?", "food", "food");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
     let call = 0;
     const { client } = scriptedLlm(() => {
       call++;
       return call === 1
-        ? okResponse({ a: "How are you growing lately?", b: "What did you read?", topicA: "self-improvement" })
-        : okResponse({ a: "What's the last thing you cooked?", b: "What did you read?", topicA: "cooking" });
+        ? responseFor(sel, { aPrompt: "How did the defense go?", bPrompt: "Go-to snack?", aSeedId: 999 })
+        : responseFor(sel, { aPrompt: "How did the defense go?", bPrompt: "Go-to snack?" });
     });
-    const result = await makeSource(ledger, client).nextPrompts("2026-07-20");
+    await makeSource(ledger, client, sel).nextPrompts("2026-07-20");
     expect(call).toBe(2);
-    expect(result.prompts.a.text).toBe("What's the last thing you cooked?");
-    expect(ledger.generationLogFor("2026-07-20").find((r) => r.person === "a")!.topic).toBe("cooking");
+  });
+});
+
+describe("anchor check", () => {
+  test("an anchor miss on an exploit target retries with a reason, and passes once the anchor check returns true", async () => {
+    const ledger = Ledger.open(":memory:");
+    const nodeId = seedNode(ledger, "a");
+    const seed = makeSeed(ledger, 12, "What's a hobby you'd like to pick up?", "play", "play");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
+    let anchorCalls = 0;
+    const checkAnchor = () => {
+      anchorCalls++;
+      return anchorCalls > 1; // fails once, then passes
+    };
+    const { client, calls } = scriptedLlm(() => responseFor(sel, { aPrompt: "How did the defense go?", bPrompt: "New hobby?" }));
+    const result = await makeSource(ledger, client, sel, { checkAnchor }).nextPrompts("2026-07-20");
+    expect(calls.length).toBe(2);
+    expect(calls[1]!.user).toContain("shares no content word");
+    expect(result.prompts.a.text).toBe("How did the defense go?");
+  });
+
+  test("the anchor check is never called for an explore (seed) target, which is anchored by construction", async () => {
+    const ledger = Ledger.open(":memory:");
+    const nodeId = seedNode(ledger, "a");
+    const seed = makeSeed(ledger, 13, "What's a smell that takes you back?", "nostalgia", "nostalgia");
+    // Both people explore this time, so no node target exists to anchor.
+    const seedB = makeSeed(ledger, 14, "What's your comfort show?", "media", "media");
+    const sel: Selection = { a: exploreCandidate("a", seed), b: exploreCandidate("b", seedB), relaxations: [], background: emptyBackground };
+    let anchorCalls = 0;
+    const { client } = scriptedLlm(() => responseFor(sel, { aPrompt: "What's a smell that takes you back?", bPrompt: "Comfort show?" }));
+    await makeSource(ledger, client, sel, { checkAnchor: () => { anchorCalls++; return true; } }).nextPrompts("2026-07-20");
+    expect(anchorCalls).toBe(0);
+  });
+
+  test("an anchor miss on the final attempt still ships (bypass, like the other wording guards)", async () => {
+    const ledger = Ledger.open(":memory:");
+    const nodeId = seedNode(ledger, "a");
+    const seed = makeSeed(ledger, 15, "What's a small treat you love?", "food", "food");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
+    const { client, calls } = scriptedLlm(() => responseFor(sel, { aPrompt: "How did the defense go?", bPrompt: "Small treat?" }));
+    const result = await makeSource(ledger, client, sel, { checkAnchor: () => false }).nextPrompts("2026-07-20");
+    expect(calls.length).toBe(4);
+    expect(result.prompts.a.text).toBe("How did the defense go?");
+  });
+});
+
+describe("wording guards survive", () => {
+  test("retries when person A's generated prompt near-duplicates one already sent to A", async () => {
+    const ledger = Ledger.open(":memory:");
+    const day = ledger.createDay("2026-07-19", "p1", "What's an unexpected sound or noise you secretly enjoy?", "t");
+    ledger.resolveDay(day.id, "resolved_shared", "t2");
+    const nodeId = seedNode(ledger, "a");
+    const seed = makeSeed(ledger, 16, "What's your favorite drink?", "food", "food");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
+    let call = 0;
+    const { client } = scriptedLlm(() => {
+      call++;
+      return call === 1
+        ? responseFor(sel, { aPrompt: "What's an unexpected sound you secretly enjoy?", bPrompt: "What's your favorite drink?" })
+        : responseFor(sel, { aPrompt: "How did the defense go?", bPrompt: "What's your favorite drink?" });
+    });
+    const result = await makeSource(ledger, client, sel).nextPrompts("2026-07-20");
+    expect(call).toBe(2);
+    expect(result.prompts.a.text).toBe("How did the defense go?");
   });
 
   test("retries when a prompt reuses the opening frame of a recent question", async () => {
-    // Eight of nine live questions opened "What's a/an/one...". openingStem
-    // existed for exactly this and only ran in the offline report.
     const ledger = Ledger.open(":memory:");
     const day = ledger.createDay("2026-07-19", "p1", "theme", "t");
     ledger.setPersonPrompt(day.id, "a", "g", "What's one thing you're improving?");
     ledger.resolveDay(day.id, "resolved_shared", "t2");
+    const nodeId = seedNode(ledger, "a");
+    const seed = makeSeed(ledger, 17, "How was the show?", "media", "media");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
     let call = 0;
     const { client } = scriptedLlm(() => {
       call++;
       return call === 1
-        ? okResponse({ a: "What's one thing you're avoiding?", b: "How was the show?" })
-        : okResponse({ a: "When did you last surprise yourself?", b: "How was the show?" });
+        ? responseFor(sel, { aPrompt: "What's one thing you're avoiding?", bPrompt: "How was the show?" })
+        : responseFor(sel, { aPrompt: "When did you last surprise yourself?", bPrompt: "How was the show?" });
     });
-    const result = await makeSource(ledger, client).nextPrompts("2026-07-20");
+    const result = await makeSource(ledger, client, sel).nextPrompts("2026-07-20");
     expect(call).toBe(2);
     expect(result.prompts.a.text).toBe("When did you last surprise yourself?");
   });
 
-  test("retries when both people are handed the same sentence frame today", async () => {
-    const ledger = Ledger.open(":memory:");
-    let call = 0;
-    const { client } = scriptedLlm(() => {
-      call++;
-      return call === 1
-        ? okResponse({ a: "What's one thing you're proud of?", b: "What's one thing you're avoiding?" })
-        : okResponse({ a: "What's one thing you're proud of?", b: "When did you last laugh hard?" });
-    });
-    await makeSource(ledger, client).nextPrompts("2026-07-20");
-    expect(call).toBe(2);
-  });
-});
-
-describe("theme repetition guard", () => {
   test("retries when the day's shared angle repeats a recent one", async () => {
-    // Live symptom: "personal growth and improvement" followed by "personal
-    // improvement journey". Every per-person topic tag differed, so only the
-    // theme could catch it.
     const ledger = Ledger.open(":memory:");
     ledger.createDay("2026-07-19", "p1", "label", "t", "personal growth and improvement");
+    const nodeId = seedNode(ledger, "a");
+    const seed = makeSeed(ledger, 18, "What did you cook?", "food", "food");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
     let call = 0;
     const { client } = scriptedLlm(() => {
       call++;
       return call === 1
-        ? okResponse({ a: "How are you growing?", b: "What are you learning?", theme: "personal improvement journey" })
-        : okResponse({ a: "Where did you eat last?", b: "What did you cook?", theme: "food and eating out" });
+        ? responseFor(sel, { aPrompt: "How are you growing?", bPrompt: "What are you learning?", theme: "personal improvement journey" })
+        : responseFor(sel, { aPrompt: "How did the defense go?", bPrompt: "What did you cook?", theme: "food and eating out" });
     });
-    const result = await makeSource(ledger, client).nextPrompts("2026-07-20");
+    const result = await makeSource(ledger, client, sel).nextPrompts("2026-07-20");
     expect(call).toBe(2);
     expect(result.theme).toBe("food and eating out");
   });
 });
 
-describe("retry feedback", () => {
-  test("a rejected attempt tells the model why before it answers again", async () => {
-    // Observed live: four consecutive misses citing the same unoffered
-    // domain, because the retry reused the identical prompt.
+describe("failure handling", () => {
+  test("throws when the LLM call itself rejects", async () => {
     const ledger = Ledger.open(":memory:");
-    let call = 0;
-    const { client, calls } = scriptedLlm(() => {
-      call++;
-      return call === 1
-        ? okResponse({ a: "p", b: "q", targetExploreA: UNOFFERED_DOMAIN })
-        : okResponse({ a: "p2", b: "q", targetExploreA: OFFERED_DOMAIN });
+    const nodeId = seedNode(ledger, "a");
+    const seed = makeSeed(ledger, 19, "What's your ideal breakfast?", "food", "food");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
+    const client: LlmClient = { async complete() { throw new Error("network down"); } };
+    await expect(makeSource(ledger, client, sel).nextPrompts("2026-07-20")).rejects.toThrow(/network down/);
+  });
+
+  test("throws when the LLM response is not valid JSON after retries are exhausted", async () => {
+    const ledger = Ledger.open(":memory:");
+    const nodeId = seedNode(ledger, "a");
+    const seed = makeSeed(ledger, 20, "What's your ideal breakfast?", "food", "food");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
+    const { client } = scriptedLlm(() => "not json");
+    await expect(makeSource(ledger, client, sel).nextPrompts("2026-07-20")).rejects.toThrow();
+  });
+
+  test("does not record a generation_log row when generation throws (log-on-success-only)", async () => {
+    const ledger = Ledger.open(":memory:");
+    const nodeId = seedNode(ledger, "a");
+    const seed = makeSeed(ledger, 21, "What's your ideal breakfast?", "food", "food");
+    const sel: Selection = { a: exploitCandidate(ledger, "a", nodeId), b: exploreCandidate("b", seed), relaxations: [], background: emptyBackground };
+    const { client } = scriptedLlm(() => "not json");
+    await expect(makeSource(ledger, client, sel).nextPrompts("2026-07-20")).rejects.toThrow();
+    expect(ledger.generationLogFor("2026-07-20")).toEqual([]);
+  });
+
+  test("propagates when buildSelectionInput throws", async () => {
+    const ledger = Ledger.open(":memory:");
+    const { client } = scriptedLlm(() => "irrelevant");
+    const deps: SelectionDeps = {
+      buildSelectionInput: () => { throw new Error("selection read failed"); },
+      selectPair: () => { throw new Error("unreachable"); },
+      checkAnchor: () => true,
+    };
+    const source = new AdaptivePromptSource(deps, client, ledger, {
+      model: "m", historyWindowDays: 14, feedbackWindowDays: 14, names: { a: "Alex", b: "Sam" }, constants: CONSTANTS,
     });
-    await makeSource(ledger, client).nextPrompts("2026-07-20");
-    expect(calls.length).toBe(2);
-    expect(calls[0]!.user).not.toContain("REJECTED");
-    expect(calls[1]!.user).toContain("PREVIOUS ATTEMPT WAS REJECTED");
-    expect(calls[1]!.user).toContain(UNOFFERED_DOMAIN);
+    await expect(source.nextPrompts("2026-07-20")).rejects.toThrow(/selection read failed/);
+  });
+});
+
+describe("background rendering", () => {
+  test("a person's background nodes render as not-targetable and appear in their own section only", async () => {
+    const ledger = Ledger.open(":memory:");
+    const nodeId = seedNode(ledger, "a");
+    const seed = makeSeed(ledger, 22, "What's your favorite room in your place?", "home", "home");
+    const sel: Selection = {
+      a: exploitCandidate(ledger, "a", nodeId),
+      b: exploreCandidate("b", seed),
+      relaxations: [],
+      background: { a: [{ domain: "childhood", subdomain: "hometown" }], b: [] },
+    };
+    const { client, calls } = scriptedLlm(() => responseFor(sel, { aPrompt: "How did the defense go?", bPrompt: "Favorite room?" }));
+    await makeSource(ledger, client, sel).nextPrompts("2026-07-20");
+    const alexSection = calls[0]!.user.slice(calls[0]!.user.indexOf("PERSON A:"), calls[0]!.user.indexOf("PERSON B:"));
+    expect(alexSection).toContain("BACKGROUND (do not target):");
+    expect(alexSection).toContain("childhood / hometown");
   });
 });

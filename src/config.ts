@@ -93,6 +93,37 @@ const rawConfigSchema = z.object({
       animalTimeoutMs: z.number().int().positive().default(10_000),
     })
     .default({ intensity: "off", animalImage: true, animalKind: "cats", animalTimeoutMs: 10_000 }),
+  // Ten constants from the ee-synthesis-design spec's Constants section,
+  // every one a window length (days) or a count, never a switch. Unlike
+  // personality, defaulting this block on is safe: there is no "off" state
+  // to accidentally skip past, only how wide the windows are, so an existing
+  // config.json restarting with no selection key gets the spec's verified
+  // defaults rather than a feature silently turning on.
+  selection: z
+    .object({
+      settlingDays: z.number().int().positive().default(2),
+      subjectCooldownDays: z.number().int().positive().default(14),
+      domainCooldownDays: z.number().int().positive().default(4),
+      familyCooldownDays: z.number().int().positive().default(7),
+      tokenWindowDays: z.number().int().positive().default(3),
+      exploitRunCap: z.number().int().positive().default(2),
+      budgetCap: z.number().int().positive().default(3),
+      candidateDepth: z.number().int().positive().default(8),
+      seedReuseDays: z.number().int().positive().default(90),
+      anchorMinSharedWords: z.number().int().positive().default(1),
+    })
+    .default({
+      settlingDays: 2,
+      subjectCooldownDays: 14,
+      domainCooldownDays: 4,
+      familyCooldownDays: 7,
+      tokenWindowDays: 3,
+      exploitRunCap: 2,
+      budgetCap: 3,
+      candidateDepth: 8,
+      seedReuseDays: 90,
+      anchorMinSharedWords: 1,
+    }),
 });
 
 export interface Config {
@@ -114,6 +145,18 @@ export interface Config {
   // src/engine/ here would invert the dependency direction. The duplication
   // is guarded by a compile-time assertion in tests/config.test.ts.
   personality: { intensity: "off" | "subtle" | "playful"; animalImage: boolean; animalKind: "cats" | "dogs" | "both"; animalTimeoutMs: number };
+  selection: {
+    settlingDays: number;
+    subjectCooldownDays: number;
+    domainCooldownDays: number;
+    familyCooldownDays: number;
+    tokenWindowDays: number;
+    exploitRunCap: number;
+    budgetCap: number;
+    candidateDepth: number;
+    seedReuseDays: number;
+    anchorMinSharedWords: number;
+  };
   spectrum: { projectId: string; projectSecret: string };
   openrouter: { apiKey: string };
   supermemory: { apiKey: string; baseUrl: string };

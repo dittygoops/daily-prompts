@@ -434,3 +434,182 @@ describe("summary rewrite trigger", () => {
     expect(ledger.nodesFor("a")[0]!.summary).toBe("Likes to cook.");
   });
 });
+
+describe("2026-08-02 synthesis design: family, eventDate, alsoAbout filing", () => {
+  test("eventDate on a newNode sets the node's event_date and mints a follow-up token", async () => {
+    const ledger = Ledger.open(":memory:");
+    const day = ledger.createDay("2026-08-01", "p1", "x", "t0");
+    ledger.finalizeResponse(day.id, "a", "birthday dinner planned", "t1");
+    ledger.resolveDay(day.id, "resolved_partial", "t2");
+    const { client } = scriptedLlm(() =>
+      JSON.stringify({
+        observations: [
+          {
+            type: "thread",
+            text: "Birthday dinner on 2026-08-15.",
+            newNode: {
+              domain: "family",
+              subdomain: "birthday-dinner",
+              summary: "A birthday dinner tradition.",
+              eventDate: "2026-08-15",
+            },
+          },
+        ],
+      }),
+    );
+    await processPending({ ledger, llm: client, log: () => {}, person: "a" });
+    const node = ledger.nodesFor("a")[0]!;
+    expect(node.eventDate).toBe("2026-08-15");
+    const tokens = ledger.fireableTokens("2026-08-16", 3); // [08-13, 08-16) covers 08-15
+    expect(tokens.some((t) => t.nodeId === node.id && t.eventDate === "2026-08-15")).toBe(true);
+  });
+
+  test("eventDate citing an existing nodeId updates event_date and mints a token, idempotent via UNIQUE on re-filing the same date", async () => {
+    const ledger = Ledger.open(":memory:");
+    const nodeId = ledger.createNode({
+      person: "a", domain: "family", subdomain: "birthday-dinner", summary: "A birthday dinner tradition.", eventDate: null, at: "t0",
+    });
+    const day = ledger.createDay("2026-08-01", "p1", "x", "t0");
+    ledger.finalizeResponse(day.id, "a", "dinner is set for the 15th", "t1");
+    ledger.resolveDay(day.id, "resolved_partial", "t2");
+    const { client } = scriptedLlm(() =>
+      JSON.stringify({ observations: [{ type: "thread", text: "Dinner on 2026-08-15.", nodeId, eventDate: "2026-08-15" }] }),
+    );
+    await processPending({ ledger, llm: client, log: () => {}, person: "a" });
+    expect(ledger.nodesFor("a").find((n) => n.id === nodeId)!.eventDate).toBe("2026-08-15");
+    expect(ledger.fireableTokens("2026-08-16", 3).filter((t) => t.nodeId === nodeId).length).toBe(1);
+
+    // A second, later day re-cites the SAME date on the same node: mintToken's
+    // own UNIQUE(node_id, event_date) makes this a no-op, not a second token.
+    const day2 = ledger.createDay("2026-08-02", "p2", "x", "t3");
+    ledger.finalizeResponse(day2.id, "a", "still looking forward to it", "t4");
+    ledger.resolveDay(day2.id, "resolved_partial", "t5");
+    const { client: client2 } = scriptedLlm(() =>
+      JSON.stringify({ observations: [{ type: "fact", text: "Still excited for the 2026-08-15 dinner.", nodeId, eventDate: "2026-08-15" }] }),
+    );
+    await processPending({ ledger, llm: client2, log: () => {}, person: "a" });
+    expect(ledger.fireableTokens("2026-08-16", 3).filter((t) => t.nodeId === nodeId).length).toBe(1);
+  });
+
+  test("alsoAbout files secondary homes via addFactSubject, visible through the union read across ALL homes", async () => {
+    const ledger = Ledger.open(":memory:");
+    const primaryId = ledger.createNode({ person: "a", domain: "family", subdomain: "cora", summary: "Cora, a close friend.", eventDate: null, at: "t0" });
+    const day = ledger.createDay("2026-08-01", "p1", "x", "t0");
+    ledger.finalizeResponse(day.id, "a", "psychic party story", "t1");
+    ledger.resolveDay(day.id, "resolved_partial", "t2");
+    const { client } = scriptedLlm(() =>
+      JSON.stringify({
+        observations: [
+          {
+            type: "fact",
+            text: "A psychic mentioned Cora's car troubles at the party.",
+            nodeId: primaryId,
+            alsoAbout: [
+              { newNode: { domain: "hobbies-interests", subdomain: "psychic-readings", summary: "Enjoys psychic readings." } },
+              { newNode: { domain: "daily-life", subdomain: "car", summary: "Owns a car." } },
+            ],
+          },
+        ],
+      }),
+    );
+    await processPending({ ledger, llm: client, log: () => {}, person: "a" });
+    const carNode = ledger.nodesFor("a").find((n) => n.subdomain === "car");
+    expect(carNode).toBeDefined();
+    // node_facts.node_id is the PRIMARY only; the secondary home is only
+    // visible through fact_subjects' union read (selectableNodes), which is
+    // exactly what W1 settling and lane-1 ordering rely on.
+    expect(ledger.nodeFactsFor(carNode!.id)).toEqual([]);
+    const selectable = ledger.selectableNodes("a").find((n) => n.id === carNode!.id)!;
+    expect(selectable.newestFactDate).toBe("2026-08-01");
+  });
+
+  test("a node created only as a secondary home still grants budget from the facts homed onto it (thread kind)", async () => {
+    const ledger = Ledger.open(":memory:");
+    const primaryId = ledger.createNode({ person: "a", domain: "family", subdomain: "cora", summary: "Cora, a close friend.", eventDate: null, at: "t0" });
+    const day = ledger.createDay("2026-08-01", "p1", "x", "t0");
+    ledger.finalizeResponse(day.id, "a", "psychic party story", "t1");
+    ledger.resolveDay(day.id, "resolved_partial", "t2");
+    const { client } = scriptedLlm(() =>
+      JSON.stringify({
+        observations: [
+          {
+            type: "thread",
+            text: "The car might need a mechanic soon, a psychic said so.",
+            nodeId: primaryId,
+            alsoAbout: [{ newNode: { domain: "daily-life", subdomain: "car", summary: "Owns a car." } }],
+          },
+        ],
+      }),
+    );
+    await processPending({ ledger, llm: client, log: () => {}, person: "a" });
+    const carNode = ledger.nodesFor("a").find((n) => n.subdomain === "car")!;
+    expect(carNode.budget).toBe(3); // thread kind -> budget 3, granted from the secondary homing alone
+  });
+
+  test("refill: a new thread-kind fact on a node via an untargeted filing (no generation_log row for the day) refills its budget", async () => {
+    const ledger = Ledger.open(":memory:");
+    const nodeId = ledger.createNode({ person: "a", domain: "daily-life", subdomain: "car", summary: "Owns a car.", eventDate: null, at: "t0" });
+    ledger.setNodeBudget(nodeId, 0, "t0"); // simulates a previously depleted/resolved node
+    const day = ledger.createDay("2026-08-01", "p1", "x", "t0");
+    ledger.finalizeResponse(day.id, "a", "car trouble again, out of nowhere", "t1");
+    ledger.resolveDay(day.id, "resolved_partial", "t2");
+    // No generation_log row at all for this day/person: refill fires from
+    // ANY filing, targeted or not (spec F5: "evidence of life counts
+    // regardless of which question surfaced it").
+    const { client } = scriptedLlm(() =>
+      JSON.stringify({ observations: [{ type: "thread", text: "Car needs a new alternator.", nodeId }] }),
+    );
+    await processPending({ ledger, llm: client, log: () => {}, person: "a" });
+    const node = ledger.nodesFor("a").find((n) => n.id === nodeId)!;
+    expect(node.budget).toBe(1); // min(cap, max(0,0)+1)
+  });
+
+  test("resolution: a targeted exploit/followup ask whose target gets no new thread this filing zeroes that node's budget", async () => {
+    const ledger = Ledger.open(":memory:");
+    const priorDay = ledger.createDay("2026-07-28", "p0", "x", "t-1");
+    const nodeId = ledger.createNode({ person: "a", domain: "daily-life", subdomain: "car", summary: "Owns a car.", eventDate: null, at: "t0" });
+    ledger.setNodeBudget(nodeId, 2, "t0");
+    ledger.addNodeFact({ nodeId, kind: "thread", text: "Car needs an alternator.", sourceDayId: priorDay.id, observedDate: "2026-07-28", at: "t0" });
+
+    const day = ledger.createDay("2026-08-01", "gen-a", "How's the car doing?", "t1");
+    ledger.recordGeneration({
+      date: "2026-08-01", promptId: "gen-a", promptText: "How's the car doing?", model: null, systemPrompt: null,
+      userPrompt: null, rawResponse: null, rationale: null, stance: "exploit", person: "a", topic: null,
+      targetNodeId: nodeId, targetDomain: "daily-life", fellBack: false, fallbackReason: null, at: "t1", lane: "exploit",
+    });
+    ledger.finalizeResponse(day.id, "a", "Still driving it, no news.", "t2");
+    ledger.resolveDay(day.id, "resolved_partial", "t3");
+    const { client } = scriptedLlm(() =>
+      // Fact only, no new thread on the targeted node: resolution should fire.
+      JSON.stringify({ observations: [{ type: "fact", text: "Still driving the car.", nodeId }] }),
+    );
+    await processPending({ ledger, llm: client, log: () => {}, person: "a" });
+    const node = ledger.nodesFor("a").find((n) => n.id === nodeId)!;
+    expect(node.budget).toBe(0);
+  });
+
+  test("resolution does NOT fire when the targeted node receives a new thread this filing", async () => {
+    const ledger = Ledger.open(":memory:");
+    const priorDay = ledger.createDay("2026-07-28", "p0", "x", "t-1");
+    const nodeId = ledger.createNode({ person: "a", domain: "daily-life", subdomain: "car", summary: "Owns a car.", eventDate: null, at: "t0" });
+    ledger.setNodeBudget(nodeId, 2, "t0");
+    ledger.addNodeFact({ nodeId, kind: "thread", text: "Car needs an alternator.", sourceDayId: priorDay.id, observedDate: "2026-07-28", at: "t0" });
+
+    const day = ledger.createDay("2026-08-01", "gen-a", "How's the car doing?", "t1");
+    ledger.recordGeneration({
+      date: "2026-08-01", promptId: "gen-a", promptText: "How's the car doing?", model: null, systemPrompt: null,
+      userPrompt: null, rawResponse: null, rationale: null, stance: "exploit", person: "a", topic: null,
+      targetNodeId: nodeId, targetDomain: "daily-life", fellBack: false, fallbackReason: null, at: "t1", lane: "exploit",
+    });
+    ledger.finalizeResponse(day.id, "a", "Still waiting on a part, mechanic said next week.", "t2");
+    ledger.resolveDay(day.id, "resolved_partial", "t3");
+    const { client } = scriptedLlm(() =>
+      JSON.stringify({ observations: [{ type: "thread", text: "Mechanic expects the part next week.", nodeId }] }),
+    );
+    await processPending({ ledger, llm: client, log: () => {}, person: "a" });
+    const node = ledger.nodesFor("a").find((n) => n.id === nodeId)!;
+    // A new thread landed on the target this filing, so refill (not
+    // resolution) applies: min(cap, max(2,0)+1) = 3, never zeroed.
+    expect(node.budget).toBe(3);
+  });
+});
