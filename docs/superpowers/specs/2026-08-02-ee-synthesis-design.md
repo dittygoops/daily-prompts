@@ -1,130 +1,147 @@
 # Question Selection: the Synthesis Design
 
-Design doc, 2026-08-02. Status: drafted from the judged competition, under review.
+Design doc, 2026-08-02. Status: **revision 2**, after adversarial and implementation-readiness review. Revision 1's twelve adversarial findings are each resolved inline and marked (F1..F12); the implementation review's rulings are adopted wholesale where not contradicted (its work breakdown, interfaces, migration sequence, and 25 decisions stand except where this revision changes the mechanism).
 
-Provenance: three from-scratch designs (decision-theory, conversation, minimalist) were written blind to each other, judged against the live failure record alongside the incumbent (docs/superpowers/specs/2026-08-02-ee-verdict.md). The incumbent lost: it stores fact kinds and never reads them, its only closure rule is answer length, its fuzzy topic guard scores 0.33 on the exact example its own comment cites against a 0.5 threshold, and its day-stance scalar structurally cannot both guarantee variety and let a dated follow-up fire. This spec is the judge's recommended hybrid: the minimalist's exclusion-window spine with named grafts, plus the corrections for every self-contradiction the judge found in the contenders.
+Provenance: three from-scratch designs judged against the live failure record alongside the incumbent (2026-08-02-ee-verdict.md). The incumbent lost on verified evidence. This is the judge's recommended hybrid, corrected twice.
 
-## What is being replaced, what survives
+## The division of labor
 
-Replaced: `decideStance`/`stanceForPerson` (the day-stance scalar, deleted), the exploit/explore candidate menu handed to the model, the model's stance and target choice, the topic-repeat guard as a selection mechanism, `shouldDeplete` and `avg_yield_chars` as closure signals.
+**Code picks WHAT to ask (a node or a seed); the model only writes the sentence.** The model no longer chooses subjects, so it cannot repeat them. Selection is a pure function of (ledger state, date): windows veto, lanes order, pairing coordinates the couple.
 
-Survives unchanged: the ontology tables and extraction pipeline (extended, below), event-date-only LIVE and the settling veto (this week's two patches the judge kept), all wording guards (near-duplicate text, opening-stem variety, same-day frame, theme), the FallbackPromptSource chain, per-person prompts, and everything outside generation.
+Replaced: the day-stance scalar, the candidate menu, model target choice, length-based depletion, the topic-repeat guard as selection. Survives: ontology tables and extraction (extended), wording guards plus a restored anchor check (F12), fallback chain, per-person prompts, everything outside generation.
 
-The division of labor becomes absolute: **code picks WHAT to ask (a subject or a seed), the model only writes the sentence.** The model no longer chooses subjects, so it can no longer repeat them.
-
-## Owner requirements this design answers
-
-1. **Closure is semantic, never length.** "I've liked paneer since childhood" is a complete answer at 38 chars. Budget-from-kind (below) encodes this: a settled preference earns one question ever; an open thread earns more; nothing reads answer length.
-2. **`tastes-preferences` domain.** Liking paneer is not a hobby. Eleventh domain, extractor refiles on rebuild.
-3. **Multi-homed facts.** The psychic-party answer is about Cora AND psychic readings AND a car. A junction table lets one fact live on several subjects, and a golden-set eval makes filing quality measurable for the first time.
-
-## Schema changes
+## Schema (delta from live)
 
 ```sql
--- nodes: the domain CHECK gains 'tastes-preferences'. SQLite cannot ALTER a
--- CHECK, so migrateSchema does a guarded table rebuild (create new, copy,
--- drop, rename) exactly once, keyed on the constraint's text.
+-- nodes: CHECK gains 'tastes-preferences' (11th domain), via the verified
+-- FK-safe rebuild in Migration below. status and avg_yield_chars drop in the
+-- same rebuild. New columns: budget INTEGER, family TEXT.
 
-ALTER TABLE nodes ADD COLUMN budget INTEGER;         -- null until granted
-ALTER TABLE nodes ADD COLUMN family TEXT;            -- closed vocabulary, below
-ALTER TABLE node_facts ADD COLUMN resolved_at TEXT;  -- threads resolve, facts do not
+ALTER TABLE node_facts ADD COLUMN resolved_at TEXT;
 
-CREATE TABLE IF NOT EXISTS fact_subjects (           -- multi-homing; node_facts.node_id stays the primary home
+CREATE TABLE IF NOT EXISTS fact_subjects (      -- every home INCLUDING the primary (impl decision 18)
   fact_id INTEGER NOT NULL REFERENCES node_facts(id),
   node_id INTEGER NOT NULL REFERENCES nodes(id),
   PRIMARY KEY (fact_id, node_id)
 );
 
-CREATE TABLE IF NOT EXISTS seeds (                   -- the explore bank, hand-written content
+-- F1: the token gets a real table and a real data source. One token per
+-- distinct event per node, so recurring events (gym meets, therapy, trips)
+-- each earn their follow-up; rev 1's once-ever-per-node is gone.
+CREATE TABLE IF NOT EXISTS followup_tokens (
   id INTEGER PRIMARY KEY,
-  text TEXT NOT NULL,                                -- a full, concrete question
-  domain TEXT NOT NULL,
-  family TEXT NOT NULL,
+  node_id INTEGER NOT NULL REFERENCES nodes(id),
+  event_date TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  spent_at TEXT,                                -- set in the same transaction as the ask
+  UNIQUE (node_id, event_date)
+);
+
+CREATE TABLE IF NOT EXISTS seeds (
+  id INTEGER PRIMARY KEY,
+  text TEXT NOT NULL, domain TEXT NOT NULL, family TEXT NOT NULL,
   UNIQUE (text)
 );
 
-ALTER TABLE generation_log ADD COLUMN lane TEXT;     -- followup | exploit | explore
+ALTER TABLE generation_log ADD COLUMN lane TEXT;      -- followup | exploit | explore
 ALTER TABLE generation_log ADD COLUMN seed_id INTEGER;
+-- F11: windows and audits must read dispatch-time snapshots, never mutable
+-- joins. A later refile of a node's domain or family must not rewrite window
+-- history. These two columns are written at dispatch and never updated.
+ALTER TABLE generation_log ADD COLUMN ask_domain TEXT;
+ALTER TABLE generation_log ADD COLUMN ask_family TEXT;
 ```
 
-**Families** are a fixed 12-item register vocabulary in code: `food, nostalgia, people, work-school, play, body, home, plans, values, media, romance, daily-mechanics`. Seeds carry a hand-assigned family. Nodes carry an extractor-assigned family from the same closed list (a bounded judgment like `kind`: enum-validated, retried once, dropped to null with a log). Family is what catches a register spread across domains: four self-improvement questions in four different domains share one family, and this week's food spiral spanned `childhood` explores and a `hobbies` exploit that all carry `food`.
+**Every window, audit, and lane query reads asks as: one row per (date, person), max(id), fell_back = 0, person IS NOT NULL** (the live table already holds a hotfix duplicate and seven legacy null-person rows; impl decision 6).
 
-## Budget: the semantic closure mechanism
+**Event dates (F1's data source):** the extractor's contract gains `eventDate` in two places: on `newNode` (a dated subject creates its node with the date) and as an optional field on any observation citing an existing `nodeId` (a new date on a known subject updates `event_date` and mints a token row if the date is new for that node). Dates obey the existing absolute-date rule. Tokens are minted at filing; nothing else creates them.
 
-Granted at node creation from the kinds of its initial facts, **1/2/3, never 0** (the judge's correction: the minimalist's 0/1/2 grant made every settled subject unaskable from birth, contradicting its own invariant that everything is askable once):
+## Families (F2 resolved)
 
-- only `fact` kinds: **1** (one question ever: "you mentioned X, tell me the story" is legitimate exactly once)
-- any `interest`: **2**
-- any `thread`: **3** (cap)
+Fifteen registers, in code: `food, nostalgia, people, self-improvement, work-school, play, body, home, plans, values-beliefs, media, romance, daily-mechanics, events-outings, money`. Rev 1's list dropped `self-improvement` and thereby failed its own motivating case: the four live self-improvement questions mapped to four different families. Verified against them now: all four carry `self-improvement` under this list.
 
-Decremented at dispatch when a question targets the node. Budget 0 means finished: excluded from selection, shown to the writer model as background context only.
+Seeds carry a hand-assigned family. Nodes carry an extractor-assigned family from the same closed vocabulary (bounded judgment, enum-validated, retried once, then null with a loud log). A null family blocks nothing and sets nothing, degrading to no-constraint rather than wrong-constraint, and audit A8 tracks the null rate so silent erosion of W4 is visible (F2's null-bypass concern: measured, not wished away).
 
-**Refill, the resolution rule graft:** after extraction of an answer to a question that targeted node N, if a NEW `thread`-kind fact was filed onto N (or onto it via `fact_subjects`), budget += 1 (cap 3): the subject demonstrably still has live material. If NO new thread fact arrived, every open thread on N gets `resolved_at` stamped: the person was asked, answered, and did not continue the thread, so the thread is done. This bounds an extractor mislabel to one wasted question in either direction and lets closure self-correct: a finished subject can come back to life only when a real answer breathes a new thread into it.
+## Budget: semantic closure (F3, F4, F5 resolved)
 
-## Selection: windows, then lanes
+Granted once per node, when its creating filing commits, from ALL facts filed onto it in that transaction (primary or secondary home; a node created only as a secondary home grants from the facts homed onto it): only `fact` kinds 1, any `interest` 2, any `thread` 3. Never 0, cap 3.
 
-All windows are **vetoes computed by SQL from generation_log and nodes**. Freshness never promotes anything (unanimous across all three designs; the direct kill of the recency-LIVE spiral).
+Dynamics, each rule reading or writing state that another rule reads (nothing write-only, F3):
 
-| Window | Rule | Prevents |
+- **Ask:** budget decrements at dispatch (`recordAsk`: last_asked, times_asked, budget, one statement).
+- **Resolution:** after extraction of an answer to a question that targeted node N, if no new thread-kind fact landed on N (via any home), N's open threads get `resolved_at` stamped AND **budget drops to 0**. The subject was asked, answered, and offered nothing new: it is done. This makes `resolved_at` load-bearing (rev 1 stamped it and nothing read it, the incumbent's exact sin) and restores the one-wasted-question bound.
+- **Refill (F5's contradiction resolved in favor of life):** a new thread-kind fact filed onto N **by any filing whatsoever**, targeted or not, primary or multi-homed, sets budget = min(cap, max(budget, 0) + 1). Evidence of life counts regardless of which question surfaced it. The weaknesses section's "dies quietly" is now true only if extraction misses the thread entirely, which the golden-set filing eval measures.
+
+## Selection
+
+### Windows (all vetoes; freshness never promotes; date comparisons are signed, F12)
+
+| | Rule | Default |
 |---|---|---|
-| W1 settling | node has a fact observed within 2 days | yesterday's answer becoming today's question |
-| W2 subject cooldown | node asked within 14 days | vada pav three days running |
-| W3 domain cooldown | domain used by this person within 4 days | childhood four times in two days |
-| W4 family cooldown | family used by this person within 3 days | the food register spiral across domains |
-| W5 exploit run cap | this person's last 2 questions were both exploit lane | novelty starvation, all-exploit drift |
+| W1 settling | any fact observed within `settlingDays`, counted across ALL homes via fact_subjects | 2 |
+| W2 subject cooldown | node asked within `subjectCooldownDays` | 14 |
+| W3 domain cooldown | `ask_domain` used by this person within `domainCooldownDays` | 4 |
+| W4 family cooldown | `ask_family` used by this person within `familyCooldownDays` | **7** |
+| W5 exploit run cap | this person's last `exploitRunCap` asks were all lane followup or exploit | 2 |
 
-**Lanes, in strict priority order:**
+F7 resolved, union reading for W1: the psychic-party answer settles Cora, psychic-readings, AND the car node for 2 days, which is precisely the D+1 car-question spiral prevented; they unfreeze at D+3 into ordinary ordering. This is 2-day settling, not the 7-day co-mention freeze the verdict rejected. A node *created* by a filing is settling by construction (its facts are new).
 
-**Lane 0, follow-up token.** When a node's `event_date` passes, a token exists for `liveEventWindowDays` (3). Spending it is recorded in the same transaction as the ask, and `UNIQUE` per node means it fires once, ever. **The token bypasses every window including W3 and W4** (the judge's fatal finding on the minimalist: its token sat inside the domain cooldown and could expire unspendable; and on the conversation design: its heat rule blocked the exact follow-up it celebrated). An appointment outranks all hygiene. This is the psychic-party case as a first-class mechanism, and it fires regardless of any rhythm state, which is the structural fix for the incumbent's irreconcilable scalar.
+F12 resolved, W5 counts followup days as exploit days (impl decision 5): six days of token-token-exploit alternation cannot evade the novelty floor. Fallback and skipped days have no lane and are invisible to the run count (impl decision 7). W4 at 7 days (rev 1 had 3, undisclosed drift from the parent's 14): verified against the live failure, the four self-improvement questions span 6 days, so 3 would have caught only one pair; 7 catches three of four, and 15 families minus at most 7 in-window minus the partner's leaves 7+, keeping feasibility.
 
-**Lane 1, exploit.** Eligible: open nodes with budget > 0 passing W1-W5. Ordered never-asked first, then stalest `last_asked`, then `id`. (The minimalist's oldest-fact-first tie-break is dropped per the verdict: it re-surfaces the most archaeological material for no articulated reason.)
+### Lanes, strict priority
 
-**Lane 2, seeded explore.** Eligible: unused-by-this-person seeds whose domain passes W3 and family passes W4. Ordered by `id`. **The seed bank is the only hand-written content in the design and the reason abstract questions become impossible: an "area of growth you're interested in" question cannot appear because no human would write one into the bank.** Authoring order IS the cold-start curve (the conversation design's graft): the first ~20 seeds are light and concrete (food, play, daily mechanics), nostalgia and people mid-bank, values and plans deferred, so day one of an empty graph asks something warm without any special-case code. ~130 seeds at launch: the existing 30-question static bank is absorbed as seeds 1-30, ~100 written new. The bank is a checked-in file; adding seeds is a PR, not a prompt tweak.
+**Lane 0, follow-up token.** Eligible: an unspent token whose `event_date` is in `[today - tokenWindowDays, today)`, signed, so a future event never looks passed (F12). Bypasses W1-W5 and budget (a token ask does not require budget and does not decrement it; F11's A7 trap). Spend = `spent_at` in the ask's transaction. Expired-unspent tokens are audit violations, full stop (A5 is a real invariant now, not "or logged why").
 
-**Joint pair selection** (decision-theory's graft, zero new constants): compute each person's top 8 eligible candidates across lanes, enumerate pairs, drop pairs violating cross-person rules (same domain today, same family today, near-identical seed), take the first pair by (lane priority sum, then person-a tie-break order). Sequential selection is gone, so neither person systematically gets second pick.
+**Lane 1, exploit.** Eligible: open nodes, budget > 0, passing W1-W5. Ordered (F4's fix, which also makes threads drive exploitation as the semantics always intended): **(1) nodes with an unresolved thread, newest thread date first; (2) never-asked nodes without threads, richest first; (3) previously asked, stalest first; then id.** Rev 1's absolute never-asked-first precedence is gone: at ~1.3 new nodes/person/day against at most 0.67 exploit asks/day, the never-asked queue grows monotonically and nothing would ever be asked twice, making budgets and refill decorative. Under this ordering a live thread outranks archaeology, and re-asking is reachable, so the budget mechanism actually runs.
 
-**Feasibility, proven not fallback:** 11 domains minus at most W3's exclusions (4 days x 1 domain/day) minus the partner's domain leaves >= 5 domains; the seed bank spans all 11; therefore lane 2 is never empty and no window ever needs relaxing. If lanes 0 and 1 are empty, the day is an explore day; that is a normal state, not a degradation.
+**Lane 2, seeded explore.** Eligible: seeds whose domain passes W3 and family passes W4, not used by this person within `seedReuseDays` (90; F10's exhaustion fix, restoring the parent's reusable-seed model; the bank never drains, it cycles). Ordered by id; authoring order is the cold-start curve.
 
-## The model's contract, after selection
+### Pairing (F6 resolved)
 
-The writer receives, per person: the selected target (a node with its facts and family, or a seed's full text), the recent question history for wording variety, moods and preferences as tone context, and remaining open nodes as background it must not target. For a seed, the model may adapt phrasing but must preserve the seed's subject. It echoes the target id; a mismatch is validate-and-retry with the reason fed back, wording guards unchanged. `generation_log` records lane, target, seed_id. The stance column is written from the lane for continuity of old reports.
+The token has genuine precedence, taken from the verdict verbatim: **a person holding a fireable token IS selected on lane 0; pairing only chooses the partner's candidate, and on a cross-person collision the PARTNER re-selects, never the token.** Both people holding tokens the same day both fire, cross-person rules waived: appointments outrank hygiene, including pairing hygiene. Only when neither person holds a token does pair enumeration run: both top-`candidateDepth` lists, drop pairs violating cross-person rules (same-day domain, same-day family; rev 1's "near-identical seed" rule is deleted, F12, distinct hand-written texts need no similarity metric), order **lexicographically by (best lane in pair, then worse lane in pair, then a's index, then b's index)**, never by sum (F6b: a sum let a tokenless tie beat structure; lexicographic cannot). If every pair is dropped: relax same-day family, then same-day domain, each relaxation recorded in `Selection.relaxations` and written as an audit row; W1-W5 are never relaxed (F6d).
 
-## Audits: regression as a row, not a vibe
+### Feasibility (F10 resolved by construction, not proof-by-marginals)
 
-Nightly (piggybacking the scoring poller), pure SQL over live history, each a named invariant:
+The seed bank must satisfy, enforced by the loader AND a test against the checked-in file: >= 8 seeds per domain spanning >= 4 families, >= 6 seeds per family spanning >= 3 domains. With 90-day reuse and those minimums, lane 2 is non-empty for any legal window state; the 30-day walk test (impl test 9) proves it against the real bank rather than arithmetic.
 
-- A1: no node asked twice within 14 days (W2 held)
-- A2: no domain used twice within 4 days per person (W3 held)
-- A3: no family used twice within 3 days per person (W4 held)
-- A4: no same-day domain or family collision across the couple
-- A5: every passed `event_date` either spent its token within 3 days or logged why not
-- A6: no more than 2 consecutive exploit-lane days per person
-- A7: no node with budget 0 was asked
+## The writer's contract
 
-Violations log loudly and land in the eval report. This week's food spiral would have been rows in A3 and A2 on day two instead of a complaint on day four.
+Per person, exactly one `ASSIGNED TARGET` block (node with dated kind-tagged facts, or a seed's full text), history for wording variety, moods/preferences as tone, background nodes it must not target. It echoes the target id; mismatch retries with the reason; **a final-attempt mismatch throws and the static bank ships** (impl decision 3: an unattributed ask corrupts every window, which is worse than a fallback day). Restored from the parents (F12): the **anchor check**, the written question must share at least one content word with its target node's subdomain, summary, or facts (deterministic, reuses `contentWords`), which is the structural guard against altitude retreat on exploit days; seeds are anchored by construction. `generation_log` records lane, target, seed_id, ask_domain, ask_family at dispatch; `stance` is written `exploit` for lanes followup/exploit and `explore` for explore, with the three-way truth in `lane` (impl decision 4).
 
-## Testing the extractor's filing (the "how do we test that" answer)
+## Audits (F11 resolved)
 
-`tests/golden/filing/`: ~20 real answers (from the ledger, names kept, they are ours) hand-labeled with expected subjects, kinds, families, and multi-homes. `scripts/eval-filing.ts` runs the real extractor against them and scores subject-match, kind-match, family-match, and multi-home recall. Run on demand like the other eval scripts; the score gates future extractor prompt changes the way the dry runs gated generation changes.
+Nightly, inside the scoring poller's own try/catch, pure SQL over dispatch-time rows only (`ask_domain`/`ask_family`, never joins to mutable node columns), deduped as defined above, persisted to `audit_log` with UNIQUE (run_date, audit, person, subject):
 
-## Migration and rollout
+- A1 no node asked twice within W2's window
+- A2 no `ask_domain` twice within W3 per person
+- A3 no `ask_family` twice within W4 per person
+- A4 no same-day domain/family collision across the couple, except token days; relaxation rows land here
+- A5 no token expired unspent
+- A6 no more than `exploitRunCap` consecutive followup-or-exploit days per person
+- A7 **deleted** (rev 1's version compared past asks to current mutable budget, unsound; the selector refuses budget-0 nodes at dispatch and that is a code invariant with a test, not an audit)
+- A8 null-family node rate, informational
 
-1. Schema commit: tables/columns above, the nodes CHECK rebuild, migrateSchema guards. Invisible.
-2. Extractor commit: family assignment, multi-home emission (1-3 subjects per fact, primary first), resolution/refill wiring in the filing transaction. Rebuild refiles paneer into `tastes-preferences`; budgets grant retroactively from existing kinds during rebuild.
-3. Selector commit: `src/selection/` pure module (windows, lanes, pairing, ~250 lines), the writer prompt rework, stance.ts deleted, adaptive.ts rewired. Verified by a multi-day dry run against the rebuilt live graph before cutover, walking S1-S7 explicitly.
-4. Seeds content: the long pole, ~130 questions. Owner reviews the bank before cutover since every explore question for months comes from it.
-5. Cutover: backup, rebuild, restart. Audits live from day one.
+## Constants
 
-Constants, all window-shaped, 8 total: settling 2, subject cooldown 14, domain cooldown 4, family cooldown 3, token window 3, exploit run cap 2, budget cap 3, candidate depth 8. Config block `selection`, defaults in zod, no schema default may enable anything silently.
+Ten, all window-shaped, in a `selection` config block (zod ints, defaults, no switches): settlingDays 2, subjectCooldownDays 14, domainCooldownDays 4, familyCooldownDays 7, tokenWindowDays 3, exploitRunCap 2, budgetCap 3, candidateDepth 8, seedReuseDays 90, anchorMinSharedWords 1. Divergences from the credited parents are deliberate and stated: subject cooldown 14 not 21 (a 20-node graph per person cannot spare 21-day freezes), domain 4 not 5 (11 domains not 12), family 7 (see W4 note).
+
+## Migration (F9 resolved, sequence verified by execution in review)
+
+The nodes rebuild must run with foreign keys OFF, outside any transaction, per SQLite's documented procedure: guard on `sqlite_master` containing 'tastes-preferences'; `PRAGMA foreign_keys = OFF`; BEGIN IMMEDIATE; create `nodes_new` (11-domain CHECK, budget, family, no status, no avg_yield_chars); copy; drop old; rename; `PRAGMA foreign_key_check` must return zero rows or rollback; COMMIT; `PRAGMA foreign_keys = ON`. `fact_subjects`, `followup_tokens`, `seeds` are created AFTER the rebuild so the rebuild has only `node_facts` as a child. `schema.sql`'s own nodes definition updates to the 11-domain form in the same commit so fresh databases skip the rebuild. `wipeGraph` deletes `fact_subjects` and `followup_tokens` before `node_facts` before `nodes` (FK order). Operationally: daemon stopped and verified with lsof, WAL checkpointed, `.backup` taken, full rehearsal on a copy including seed load, rebuild, print-graph read by hand, and a pure multi-day selector dry run walking the acceptance scenarios, before touching the real file.
+
+Rebuild grants budgets from each node's creating filing during replay (all facts of that filing), mints tokens for event dates discovered in replay, and applies resolution/refill in date order so a rebuilt graph matches a lived one.
+
+## Work breakdown, interfaces, tests, seeds
+
+The implementation review's nine-package breakdown (P0 schema/ledger through P9 migration execution), its interface definitions in `src/selection/types.ts`, its twelve named tests, and its seed logistics (TSV format, stable ids, static bank copied not moved, coverage minimums enforced twice, warmth-ordering asserted, owner review stamp gating the loader) are adopted as written, with these deltas from this revision: `SelectionInput` gains `tokens` (fireable token rows) and loses nothing; `AskRow` gains `askDomain`/`askFamily`; the selector exposes the anchor check for the writer's validation loop; P0 additionally owns `followup_tokens`; P2 additionally owns event-date extraction; test 3 (token bypasses everything) adds the budget-0 case; test 8 (refill) adds the untargeted-filing refill case; a new test asserts resolution zeroes budget. The seed bank remains the long pole and the owner review remains a gate.
 
 ## Honest weaknesses
 
-- The 14-day subject cooldown refuses a genuinely hot thread with no token. If the job search develops daily, the system asks about it at most every two weeks unless an event date gives it a token. Mitigation deferred until it is observed hurting: a `development` token type (new thread fact on an in-cooldown node grants a one-shot early return) is sketched in the conversation design and can graft later without schema change.
-- The rhythm may become legible: cooldown arithmetic could make Tuesdays feel like "new topic day". Watch, do not pre-engineer.
-- `kind` and `family` remain bounded extractor judgments. The golden-set eval measures them; it does not make them correct.
-- The seed bank ages. Seeds referencing seasons or life stages need occasional pruning; the bank is content with a maintenance cost, accepted deliberately over generated novelty, because generated novelty is where "area of growth" came from.
-- Budget-from-kind trusts initial classification more than lived behavior. A subject born as three flat facts that the couple would happily discuss for an hour gets one question unless an answer resurrects it via the refill path, which requires that one question to land well. The refill path is the only self-correction; if extraction misses a thread, the subject dies quietly.
+- W2 still cannot stop sibling-node spirals by itself (F8: the real food spiral crossed node ids). The defenses are W4 with the corrected vocabulary, W1's union settling, and extraction's near-duplicate node check; if food-register siblings proliferate anyway, the fix is extraction-side merging, not another window. A9 (informational: distinct nodes sharing a family asked within W2's window) would make this visible and can be added cheaply.
+- `kind`, `family`, and now `eventDate` are bounded extractor judgments; the golden-set eval measures them, it cannot make them correct. Lane 0's reliability is exactly event-date extraction reliability, which the decision-theory parent named as an unowned dependency and is now owned: it is measured in the filing eval.
+- The thread-first exploit ordering means a person who answers everything in closed declarative sentences (no threads extracted) gets mostly explore days. That is arguably correct behavior, and visibly so in A6/A8 trends, but it is a behavior change to watch.
+- Budget-0-via-resolution trusts one extraction pass. The refill path is now reachable from any filing, which is the mitigation, but a subject can still die on a misread answer until some later mention revives it.
 
 ## Out of scope
 
-Photos (phases 2-3, unchanged plan), recap, nudges, personality, participant memory access. Any change to extraction's zero-trust guards.
+Photos (phases 2-3), recap, nudges, personality, participant memory access, extraction's zero-trust guards.
